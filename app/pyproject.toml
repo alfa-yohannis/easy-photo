@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "easy-photo"
+version = "0.1.0"
+description = "Desktop app that filters, groups and refines photos from your own references."
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Alfa Yohannis" }]
+dependencies = [
+    "PySide6>=6.6",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.8",
+    "Pillow>=10.1",
+    "rawpy>=0.19",
+    "platformdirs>=4.0",
+    "anthropic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.gui-scripts]
+easy-photo = "easy_photo.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/easy_photo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
