@@ -36,10 +36,11 @@ py -3.12 -m venv .venv
 
 `easy-photo PATH` opens the project at `PATH` directly. Run the tests with `.venv/bin/python -m pytest` (or `.venv\Scripts\python -m pytest`).
 
-Two things are optional:
+Three things are optional:
 
 - Face recognition needs two model files from the OpenCV model zoo (about 40 MB). The Group step has a button that downloads them, or you can point it at a folder that already has them.
 - darktable 4.6 or newer, to develop raw files from their raw data and to apply darktable edits (`.xmp` files). Without it, raw files are exported from the small JPEG preview the camera stores inside them. The app finds `darktable-cli` on the PATH or in `C:\Program Files\darktable\bin`.
+- [Claude Code](https://claude.com/claude-code), logged in, for typed refinements the app's own phrases do not cover (see below).
 
 ## Projects
 
@@ -78,21 +79,21 @@ The sharpest photo of each group stands for it in the next steps. Within a group
 
 ### 4. References
 
-Each reference becomes a refinement option:
+Each group has its own references. Choose the group in "References for" at the top of the page, then add references; each one becomes a refinement option for that group only, and the list below shows that group's options. Choose "All groups" to add an option for every group. "Remove from this group" takes an option out of the chosen group only (an option no group uses any more is removed); under "All groups", "Remove option" removes it everywhere.
 
 - Your history: folders or photos you picked before. The app learns how bright you like photos, and faces when enough photos have them.
 - The internet: a search on [Wikimedia Commons](https://commons.wikimedia.org), a free photo library that needs no account. The photos found are only measured on your computer.
-- Examples: files you edited or like right now; the app learns how bright they are. A raw file is developed with `darktable-cli` first, with its own sidecar when it has one.
-- darktable edits: a darktable sidecar (`.xmp` file), added under Examples or Your history. `darktable-cli` applies the edit itself to every raw photo of the group, module by module, as darktable does when you paste a copied history. The parts that only fit the edited photo are left out: crop, perspective, orientation, retouch, spots, liquify, lens correction, the raw black and white points, and any module with a drawn mask. The option points at the file, so if you change the edit in darktable later, the next export uses the new version.
+- Examples: files you edited or like right now. Ordinary photos teach the app how bright you like them; a raw file without your own edit is developed with `darktable-cli` and measured the same way.
+- darktable edits: a raw file you edited in darktable (under Examples), or a darktable sidecar (`.xmp` file, under Examples or Your history). `darktable-cli` applies the edit itself to every raw photo of the group, module by module, as darktable does when you paste a copied history. The parts that only fit the edited photo are left out: crop, perspective, orientation, retouch, spots, liquify, lens correction, the raw black and white points, and any module with a drawn mask. A raw file counts as edited when its sidecar's history differs from what darktable set up on import (darktable keeps a hash of both). The option points at the sidecar, so if you change the edit in darktable later, the next export uses the new version.
 - Your own words, such as "brighter faces, less contrast" or "neutral, not warm, not cool".
 
 `darktable-cli` always runs in its own settings folder with a library in memory, so your darktable library and sidecar files are never touched.
 
-The unchanged photo is always an option too: darktable's development of it (with the photo's own sidecar when it has one), or the camera's picture when darktable is not installed. Each option is used for every group until you untick groups in its "Used for these groups" list, so a reference that suits the landscapes can stay out of the portraits.
+The unchanged photo is always an option too: darktable's development of it (with the photo's own sidecar when it has one), or the camera's picture when darktable is not installed.
 
 ### 5. Refine
 
-For each group, the options are shown side by side on its sample photo, together with a slightly brighter and a slightly darker copy of the first reference option. The sample is developed the way the export develops it, at 1280 px, once for each darktable edit among the options (one to three seconds each). Pick one with a click or the keys 1 to 9; it applies to every photo of the group. If none fits, type the change you want. The app makes that version at once, on top of the version you had picked, and picks it. You can also skip a group.
+For each group, its options are shown side by side on its sample photo, together with a slightly brighter and a slightly darker copy of its newest reference option. Each version is made the way the export makes it, at 1280 px: the same darktable development (about three seconds for each darktable edit among the options), the same steps, and the same light sharpen when the export sharpens. Pick one with a click or the keys 1 to 9; it applies to every photo of the group. If none fits, type the change you want. The app makes that version at once, on top of the version you had picked, and picks it. You can also skip a group.
 
 Brightness options change the whole photo with one curve and keep the colors, so faces are never lifted as a bright patch on a darker photo.
 
@@ -123,9 +124,13 @@ When the app's own phrases do not cover what you typed, Claude reads it (see bel
 
 ## Claude for your own words
 
-With an Anthropic API key, Claude reads any refinement you type, in any language ("make it moody like old film", "bikin lebih cerah tapi jangan pucat"), and turns it into the app's own adjustments. The app sends only your words, never your photos, and asks for an answer that follows a fixed JSON schema, so only adjustments the app knows can come back, each kept within its range. Claude's one-sentence reading is shown next to the new option.
+Claude reads any refinement you type, in any language ("make it moody like old film", "bikin lebih cerah tapi jangan pucat"), and turns it into the app's own adjustments. Claude's one-sentence reading is shown next to the new option.
 
-Set it up in Settings, "AI for your own words": paste a key from [console.anthropic.com](https://console.anthropic.com), or leave the field empty to use `ANTHROPIC_API_KEY` or an `ant auth login` profile. The key is stored in the app's settings file, readable only by you. The default model is Claude Opus 5.5 at low effort; Sonnet 5.5 and Haiku 5.5 can be chosen too. Requests opt into Anthropic's server-side fallback (`fallbacks: "default"`), so a request a safety classifier declines by mistake is retried on another model instead of failing.
+The app asks Claude through [Claude Code](https://claude.com/claude-code)'s `claude` command in print mode, with your own Claude login, so no API key is needed; each request counts toward your Claude plan's usage. Install Claude Code and run `claude` once to log in; the app finds it on the PATH or in `~/.local/bin`. The app sends only your words, through the command's input, never your photos. The run is kept bare: no tools, no MCP servers, no user settings or hooks, an empty temporary folder, and no saved session. Claude's answer must follow a fixed JSON schema (`--json-schema`), so only adjustments the app knows can come back, each kept within its range. An answer takes about 7 seconds.
+
+When Claude Code is installed but not logged in, a request fails with "Not logged in". The app then checks `claude auth status` and, if nobody is logged in, offers to open a terminal window that runs `claude auth login`. Claude Code opens the browser to sign in to your Claude account, so the app never sees your credentials. The app checks the login every few seconds, for up to ten minutes, and reads the words you typed as soon as you are logged in.
+
+In Settings, "AI for your own words", you can switch Claude off, choose the model (Claude Opus 5.5 at low effort by default, or Sonnet 5.5 or Haiku 5.5), see which account Claude Code is logged in to, and log in.
 
 ## Rules learned from the manual runs
 
@@ -166,7 +171,7 @@ Two coding rules hold everywhere, and [tests/test_code_rules.py](app/tests/test_
 - [rawpy](https://github.com/letmaik/rawpy) for the pictures inside raw files, and Pillow for JPEG files and EXIF data
 - numpy for the image math
 - [platformdirs](https://github.com/tox-dev/platformdirs) for the settings and cache folders of each system
-- the [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python), for reading typed refinements with Claude
+- Claude Code's `claude` command, optional, for reading typed refinements with Claude
 - darktable-cli, optional, to develop raw files and apply darktable edits
 
 Python fits because the manual workflow already ran as Python scripts, and the slow parts (decoding pictures, running the face models) run in C and C++ inside the libraries, so a compiled language would not make the app noticeably faster. The references depend on image and machine-learning libraries, and Python has the widest choice of them. PySide6 replaced the Tkinter windows of the scripts because the app needs large photo grids with zoom and background work with progress, and because it installs from pip on both systems, while Tkinter depends on how Python was built.

@@ -23,8 +23,9 @@ from easy_photo.model.project import Project
 from easy_photo.model.quality import Decision
 from easy_photo.refinement.pipeline import PipelineSource, RefinementPipeline
 from easy_photo.refinement.steps import ExposureStep, RefinementStep, StepCatalog
-from easy_photo.services.ai_words import AiReading, AiWordsReader
+from easy_photo.services.ai_words import AiLoginNeeded, AiReading, AiWordsError, AiWordsReader, LoginStatus
 from easy_photo.services.app_services import AppServices
+from easy_photo.services.darktable_edit import DarktableEdit
 from easy_photo.services.exporter import ExportResult, ExportStatus
 from easy_photo.services.faces import FaceFinder, FaceModels
 from easy_photo.services.grouping import FaceGrouper, SimilarityGrouper
@@ -39,6 +40,7 @@ from easy_photo.services.references import (
     InternetPipelineBuilder,
     PipelineBuilder,
 )
+from easy_photo.services.sharpener import Sharpener
 from easy_photo.settings import AppSettings, CheckSettings, ExportSettings, GroupSettings, SettingsStore
 from easy_photo.wording import count_text
 
@@ -109,8 +111,15 @@ class ProjectController(QObject):
     REFERENCES_TARGET = "references"
     """Where typed words came from when they were typed in the References step (otherwise a group id)."""
 
+    LOGIN_CHECK_MS = 3000
+    LOGIN_CHECKS = 200
+    """After the login window opens, the login is checked every 3 seconds, for at most 10 minutes."""
+
     words_answered = Signal(str, bool, str)
     """Typed words were read: (where they were typed, whether it worked, a message or Claude's explanation)."""
+
+    claude_login_needed = Signal()
+    """Claude Code is installed but not logged in; the window offers to open the login."""
 
     ai_changed = Signal()
     option_groups_changed = Signal(str)
@@ -153,6 +162,7 @@ class ProjectController(QObject):
         self._project: Project | None = None
         self._tasks = TaskRunner(2, self)
         self._converter = ImageConverter()
+        self._sharpener = Sharpener()
         default_checks = CheckSettings()
         self._checker = QualityChecker.from_settings(default_checks)
         self._thumbnails: dict[str, QImage] = {}
@@ -166,6 +176,12 @@ class ProjectController(QObject):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(self.SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self.save_now)
+        self._login_timer = QTimer(self)
+        self._login_timer.setInterval(self.LOGIN_CHECK_MS)
+        self._login_timer.timeout.connect(self._check_claude_login)
+        self._login_checks_left = 0
+        self._checking_login = False
+        self._retry_after_login: Callable[[], None] | None = None
 
     # ------------------------------------------------------------- properties
 
@@ -222,23 +238,49 @@ class ProjectController(QObject):
 
     @property
     def ai_ready(self) -> bool:
-        """True when Claude may be asked and an API key (or login) was found."""
-        return self._settings.ai_enabled and self._services.ai_reader.has_credentials
+        """True when Claude may be asked and Claude Code's claude program was found."""
+        return self._settings.ai_enabled and self._services.ai_reader.available
 
-    def update_ai_settings(self, enabled: bool, api_key: str, model: str) -> None:
+    @property
+    def claude_program(self) -> Path | None:
+        """Claude Code's claude program, or None when it was not found."""
+        return self._services.ai_reader.program
+
+    def claude_login_status(self) -> LoginStatus:
+        """Ask Claude Code whether it is logged in. Takes a fraction of a second.
+
+        Returns:
+            The status.
+        """
+        return self._services.ai_reader.login.status()
+
+    def start_claude_login(self) -> None:
+        """Open a terminal window where the user logs in to Claude Code, and watch for the login to finish.
+
+        When it finishes, words that waited for the login are read again.
+        """
+        try:
+            self._services.ai_reader.login.open_login_window()
+        except AiWordsError as error:
+            message = str(error)
+            self.problem.emit(message)
+            return
+        self._login_checks_left = self.LOGIN_CHECKS
+        self._login_timer.start()
+        self.notice.emit("Log in to Claude Code in the window that opened. The app notices when you are done.")
+
+    def update_ai_settings(self, enabled: bool, model: str) -> None:
         """Change whether and how Claude reads the user's words.
 
         Args:
             enabled: Let Claude read words the app's own phrases do not cover.
-            api_key: Anthropic API key; empty uses the environment or an ``ant auth login`` profile.
             model: The Claude model to ask.
         """
         self._settings.ai_enabled = enabled
-        self._settings.ai_api_key = api_key.strip()
         self._settings.ai_model = model
         self._save_settings()
         catalog = StepCatalog()
-        self._services.ai_reader = AiWordsReader(catalog, self._settings.ai_api_key, model)
+        self._services.ai_reader = AiWordsReader.locate(catalog, self._settings.claude_cli, model)
         self.ai_changed.emit()
 
     # ------------------------------------------------------ project lifecycle
@@ -296,6 +338,7 @@ class ProjectController(QObject):
 
     def shutdown(self) -> None:
         """Stop the background work and save, before the app closes."""
+        self._login_timer.stop()
         self._tasks.stop_all()
         self.save_now()
         self._tasks.wait(5000)
@@ -521,48 +564,53 @@ class ProjectController(QObject):
 
     # ------------------------------------------------- references and options
 
-    def add_history(self, paths: Sequence[Path]) -> None:
+    def add_history(self, paths: Sequence[Path], group_id: str | None = None) -> None:
         """Make an option from photos the user picked before.
 
         Each darktable edit (.xmp file) among the paths becomes an option of its own.
 
         Args:
             paths: Folders and files of those photos.
+            group_id: The group the option is for; None makes it an option for every group.
         """
         if self._project is None or not paths:
             return
-        photo_paths = self._add_darktable_edits(paths)
+        photo_paths = self._add_darktable_edits(paths, group_id, False)
         if not photo_paths:
             return
         services = self._services
         builder = HistoryPipelineBuilder(photo_paths, services.finder, services.measurer)
-        self._build_pipeline("Learning from your history", builder, "history")
+        self._build_pipeline("Learning from your history", builder, "history", group_id)
 
-    def add_examples(self, paths: Sequence[Path]) -> None:
-        """Make an option from example files the user selects now.
+    def add_examples(self, paths: Sequence[Path], group_id: str | None = None) -> None:
+        """Make options from example files the user selects now.
 
-        Each darktable edit (.xmp file) among the files becomes an option of
-        its own, which applies that edit; the other files make one option.
+        Each darktable edit among the files becomes an option of its own,
+        which applies that edit to every photo of the group: an .xmp file, or
+        a raw file whose sidecar holds the user's own darktable edit. The
+        other files make one option, which matches their brightness.
 
         Args:
             paths: The example files.
+            group_id: The group the options are for; None makes them options for every group.
         """
         if self._project is None or not paths:
             return
-        photo_paths = self._add_darktable_edits(paths)
+        photo_paths = self._add_darktable_edits(paths, group_id, True)
         if not photo_paths:
             return
         services = self._services
         builder = ExamplePipelineBuilder(
             photo_paths, services.finder, services.reader, services.measurer, services.darktable
         )
-        self._build_pipeline("Learning from your examples", builder, "examples")
+        self._build_pipeline("Learning from your examples", builder, "examples", group_id)
 
-    def search_internet(self, query: str) -> None:
+    def search_internet(self, query: str, group_id: str | None = None) -> None:
         """Make an option from photos found on the internet.
 
         Args:
             query: What to search for.
+            group_id: The group the option is for; None makes it an option for every group.
         """
         project = self._project
         cleaned = query.strip()
@@ -571,10 +619,10 @@ class ProjectController(QObject):
         folder = project.folder / "references" / "internet"
         services = self._services
         builder = InternetPipelineBuilder(cleaned, services.web_search, services.measurer, folder)
-        self._build_pipeline(f'Searching for "{cleaned}"', builder, "internet")
+        self._build_pipeline(f'Searching for "{cleaned}"', builder, "internet", group_id)
 
-    def add_words(self, text: str) -> None:
-        """Make an option for all groups from words the user typed.
+    def add_words(self, text: str, group_id: str | None = None) -> None:
+        """Make an option from words the user typed in the References step.
 
         The app's own phrases are tried first; when they do not cover the
         words and Claude may be asked, Claude reads them in the background.
@@ -582,14 +630,32 @@ class ProjectController(QObject):
 
         Args:
             text: What the user typed, such as "brighter, more contrast".
+            group_id: The group the option is for; None makes it an option for every group.
         """
         if self._project is None:
             return
         parsed = self._services.parser.parse(text)
         if parsed.is_complete:
-            self._add_words_option(text, parsed.steps, "")
+            self._add_words_option(text, parsed.steps, "", group_id)
             return
-        self._ask_claude_or_explain(self.REFERENCES_TARGET, text, parsed.unknown, self._on_claude_read_for_references)
+        handler = partial(self._on_claude_read_for_references, group_id)
+        retry = partial(self.add_words, text, group_id)
+        self._ask_claude_or_explain(self.REFERENCES_TARGET, text, parsed.unknown, handler, retry)
+
+    def remove_option_from_group(self, group_id: str, pipeline_id: str) -> None:
+        """Take an option out of one group, and out of the project once no group uses it.
+
+        Args:
+            group_id: Id of the group.
+            pipeline_id: Id of the option.
+        """
+        project = self._project
+        if project is None or pipeline_id == RefinementPipeline.CAMERA_ID:
+            return
+        self.set_option_used(group_id, pipeline_id, False)
+        users = [group.id for group in project.groups if project.option_used_in(group.id, pipeline_id)]
+        if not users:
+            self.remove_pipeline(pipeline_id)
 
     def remove_pipeline(self, pipeline_id: str) -> None:
         """Remove a shared option. The camera option stays.
@@ -612,7 +678,7 @@ class ProjectController(QObject):
         """The options shown for a group in the Refine step.
 
         They are the shared options, a slightly brighter and a slightly
-        darker copy of the first reference option (or of the unchanged photo),
+        darker copy of the newest reference option (or of the unchanged photo),
         and the options typed for this group.
 
         Args:
@@ -670,7 +736,8 @@ class ProjectController(QObject):
         options = self.options_for(group_id)
         faces = project.faces_of(sample.id)
         self._rendering.add(group_id)
-        job = partial(self._versions_job, group_id, sample, options, faces)
+        sharpen = project.export.sharpen
+        job = partial(self._versions_job, group_id, sample, options, faces, sharpen)
         failed = partial(self._on_versions_failed, group_id)
         self._tasks.start("Making the versions to compare", job, self._on_versions_ready, failed)
 
@@ -694,7 +761,8 @@ class ProjectController(QObject):
             self._add_typed_option(group_id, base_id, text, parsed.steps, "")
             return
         handler = partial(self._on_claude_read_for_group, group_id, base_id)
-        self._ask_claude_or_explain(group_id, text, parsed.unknown, handler)
+        retry = partial(self.try_words, group_id, base_id, text)
+        self._ask_claude_or_explain(group_id, text, parsed.unknown, handler, retry)
 
     def set_option_used(self, group_id: str, pipeline_id: str, used: bool) -> None:
         """Turn a shared option on or off for one group.
@@ -1086,37 +1154,47 @@ class ProjectController(QObject):
 
     # ------------------------------------------------------ private: options
 
-    def _add_darktable_edits(self, paths: Sequence[Path]) -> list[Path]:
-        """Make one option for each darktable edit (.xmp file) among the paths.
+    def _add_darktable_edits(self, paths: Sequence[Path], group_id: str | None, raw_edits: bool) -> list[Path]:
+        """Make one option for each darktable edit among the paths.
 
         Args:
             paths: Files and folders the user chose as references.
+            group_id: The group the options are for, or None for every group.
+            raw_edits: Also treat a raw file whose sidecar holds the user's own
+                edit as that edit (when darktable-cli is there to apply it);
+                otherwise only .xmp files count as edits.
 
         Returns:
             The other paths, which are photos or folders of photos.
         """
+        darktable = self._services.darktable
         photo_paths: list[Path] = []
         for path in paths:
             suffix = path.suffix.lower()
-            if suffix != ".xmp":
+            edit_file = None
+            if suffix == ".xmp" or (raw_edits and darktable.available):
+                edit_file = DarktableEdit.edit_file_for(path)
+            if edit_file is None:
                 photo_paths.append(path)
                 continue
-            builder = DarktableEditPipelineBuilder(path, self._services.darktable)
-            self._build_pipeline(f"Reading the darktable edit {path.name}", builder, "darktable")
+            builder = DarktableEditPipelineBuilder(edit_file, darktable)
+            self._build_pipeline(f"Reading the darktable edit {edit_file.name}", builder, "darktable", group_id)
         return photo_paths
 
-    def _build_pipeline(self, title: str, builder: PipelineBuilder, prefix: str) -> None:
+    def _build_pipeline(self, title: str, builder: PipelineBuilder, prefix: str, group_id: str | None) -> None:
         """Build an option from references in the background.
 
         Args:
             title: What is being done, for the status bar.
             builder: The builder for this kind of reference.
             prefix: Start of the new option's id, such as "history".
+            group_id: The group the option is for, or None for every group.
         """
         pipeline_id = self._new_pipeline_id(prefix)
         job = partial(self._pipeline_job, builder, pipeline_id)
+        built = partial(self._on_pipeline_built, group_id)
         failed = partial(self._on_pipeline_failed, pipeline_id)
-        self._tasks.start(title, job, self._on_pipeline_built, failed)
+        self._tasks.start(title, job, built, failed)
 
     def _pipeline_job(self, builder: PipelineBuilder, pipeline_id: str, context: TaskContext) -> RefinementPipeline:
         """Run a builder. Runs on a worker thread.
@@ -1131,10 +1209,11 @@ class ProjectController(QObject):
         """
         return builder.build(pipeline_id, context.report)
 
-    def _on_pipeline_built(self, pipeline: RefinementPipeline) -> None:
-        """Add a new option to the project.
+    def _on_pipeline_built(self, group_id: str | None, pipeline: RefinementPipeline) -> None:
+        """Add a new option to the project, for one group or for every group.
 
         Args:
+            group_id: The group the option is for, or None for every group.
             pipeline: The new option.
         """
         self._reserved_ids.discard(pipeline.id)
@@ -1142,13 +1221,34 @@ class ProjectController(QObject):
         if project is None:
             return
         project.add_pipeline(pipeline)
+        group = project.group(group_id) if group_id else None
+        if group is not None:
+            self._use_only_for(group.id, pipeline.id)
         self._versions.clear()
         steps = pipeline.describe_steps()
-        details = {"option": pipeline.name, "source": pipeline.source.name, "steps": steps}
+        details = {"option": pipeline.name, "source": pipeline.source.name, "steps": steps, "group": group_id}
         self._services.history_log.record("option", details)
         self.pipelines_changed.emit()
         self._changed()
-        self.notice.emit(f"Added the option {pipeline.name}.")
+        if group is None:
+            self.notice.emit(f"Added the option {pipeline.name}.")
+            return
+        self.notice.emit(f"Added the option {pipeline.name} for {group.title}.")
+
+    def _use_only_for(self, group_id: str, pipeline_id: str) -> None:
+        """Turn an option off for every group but one.
+
+        The option stays in the project, so the user can turn it on for other
+        groups in the References step.
+
+        Args:
+            group_id: The group that keeps the option.
+            pipeline_id: Id of the option.
+        """
+        project = self._project
+        for group in project.groups:
+            if group.id != group_id:
+                project.set_option_used(group.id, pipeline_id, False)
 
     def _ask_claude_or_explain(
         self,
@@ -1156,6 +1256,7 @@ class ProjectController(QObject):
         text: str,
         unknown: Sequence[str],
         on_read: Callable[[str, AiReading], None],
+        retry: Callable[[], None],
     ) -> None:
         """Let Claude read words the app's phrases did not cover, or say what was not understood.
 
@@ -1164,19 +1265,20 @@ class ProjectController(QObject):
             text: What the user typed.
             unknown: The phrases the app's own reader did not understand.
             on_read: Gets the words and Claude's reading when Claude answers.
+            retry: Asks again with the same words; kept when Claude Code needs a login first.
         """
         if not self.ai_ready:
             message = self._services.parser.explain(unknown)
             if self.ai_enabled:
-                message = f"{message} To let Claude read any words, add an API key in Settings."
+                message = f"{message} To let Claude read any words, install Claude Code and log in."
             self.words_answered.emit(target, False, message)
             return
         job = partial(self._claude_job, text)
-        handler = partial(on_read, text)
+        handler = partial(self._on_claude_answer, target, on_read, retry, text)
         failed = partial(self._on_words_failed, target)
         self._tasks.start("Asking Claude to read your words", job, handler, failed)
 
-    def _claude_job(self, text: str, context: TaskContext) -> AiReading:
+    def _claude_job(self, text: str, context: TaskContext) -> AiReading | None:
         """Ask Claude to read the words. Runs on a worker thread.
 
         Args:
@@ -1184,18 +1286,103 @@ class ProjectController(QObject):
             context: Not used; the request is a single call.
 
         Returns:
-            Claude's reading.
+            Claude's reading, or None when Claude Code needs a login first.
         """
-        return self._services.ai_reader.read(text)
+        try:
+            return self._services.ai_reader.read(text)
+        except AiLoginNeeded:
+            return None
 
-    def _on_claude_read_for_references(self, text: str, reading: AiReading) -> None:
-        """Make the shared option Claude read from the words typed in the References step.
+    def _on_claude_answer(
+        self,
+        target: str,
+        on_read: Callable[[str, AiReading], None],
+        retry: Callable[[], None],
+        text: str,
+        reading: AiReading | None,
+    ) -> None:
+        """Use Claude's reading, or offer the login when Claude Code is not logged in.
 
         Args:
+            target: Where the words were typed.
+            on_read: Gets the words and Claude's reading.
+            retry: Asks again with the same words, after the login.
+            text: What the user typed.
+            reading: Claude's reading, or None when a login is needed.
+        """
+        if reading is not None:
+            on_read(text, reading)
+            return
+        self._retry_after_login = retry
+        message = f"{AiWordsReader.LOGIN_NEEDED} Your words are read as soon as you log in."
+        self.words_answered.emit(target, False, message)
+        self.claude_login_needed.emit()
+
+    def _check_claude_login(self) -> None:
+        """Check in the background whether the user finished logging in to Claude Code; give up after a while."""
+        if self._checking_login:
+            return
+        if self._login_checks_left <= 0:
+            self._login_timer.stop()
+            self._retry_after_login = None
+            self.problem.emit("The Claude Code login did not finish. Try again in Settings, AI for your own words.")
+            return
+        self._login_checks_left -= 1
+        self._checking_login = True
+        self._tasks.start(
+            "Checking the Claude Code login",
+            self._login_status_job,
+            self._on_login_status,
+            self._on_login_check_failed,
+            quiet=True,
+        )
+
+    def _login_status_job(self, context: TaskContext) -> LoginStatus:
+        """Ask Claude Code whether it is logged in. Runs on a worker thread.
+
+        Args:
+            context: Not used.
+
+        Returns:
+            The status.
+        """
+        return self._services.ai_reader.login.status()
+
+    def _on_login_status(self, status: LoginStatus) -> None:
+        """Once the user is logged in, say so and read the words that waited for the login.
+
+        Args:
+            status: Whether Claude Code is logged in now.
+        """
+        self._checking_login = False
+        if not status.logged_in:
+            return
+        self._login_timer.stop()
+        account = f" as {status.account}" if status.account else ""
+        self.notice.emit(f"Claude Code is logged in{account}.")
+        self.ai_changed.emit()
+        retry = self._retry_after_login
+        self._retry_after_login = None
+        if retry is not None:
+            retry()
+
+    def _on_login_check_failed(self, _message: str) -> None:
+        """Allow the next login check after one failed.
+
+        Args:
+            _message: The error message (not shown; the next check tries again).
+        """
+        self._checking_login = False
+
+    def _on_claude_read_for_references(self, group_id: str | None, text: str, reading: AiReading) -> None:
+        """Make the option Claude read from the words typed in the References step.
+
+        Args:
+            group_id: The group the option is for, or None for every group.
             text: What the user typed.
             reading: The steps and Claude's explanation.
         """
-        self._add_words_option(text, reading.steps, reading.explanation)
+        self._add_words_option(text, reading.steps, reading.explanation, group_id)
 
     def _on_claude_read_for_group(self, group_id: str, base_id: str | None, text: str, reading: AiReading) -> None:
         """Make the group option Claude read from the words typed in the Refine step.
@@ -1217,19 +1404,26 @@ class ProjectController(QObject):
         """
         self.words_answered.emit(target, False, message)
 
-    def _add_words_option(self, text: str, steps: Sequence[RefinementStep], explanation: str) -> None:
-        """Add a shared option made from typed words.
+    def _add_words_option(
+        self,
+        text: str,
+        steps: Sequence[RefinementStep],
+        explanation: str,
+        group_id: str | None,
+    ) -> None:
+        """Add an option made from words typed in the References step.
 
         Args:
             text: What the user typed.
             steps: The steps read from it.
             explanation: Claude's sentence about the steps; empty when the app's own phrases read them.
+            group_id: The group the option is for, or None for every group.
         """
         cleaned = text.strip()
         pipeline_id = self._new_pipeline_id("words")
         details = f"Read by Claude: {explanation}" if explanation else ""
         pipeline = RefinementPipeline(pipeline_id, f"Your words: {cleaned}", PipelineSource.WORDS, steps, details)
-        self._on_pipeline_built(pipeline)
+        self._on_pipeline_built(group_id, pipeline)
         self.words_answered.emit(self.REFERENCES_TARGET, True, explanation)
 
     def _add_typed_option(
@@ -1300,13 +1494,16 @@ class ProjectController(QObject):
     def _variant_base(self, shared: Sequence[RefinementPipeline]) -> RefinementPipeline:
         """The option the brighter and darker copies are made from.
 
+        The newest reference wins, because a reference added for one group
+        comes after the references shared by every group.
+
         Args:
-            shared: The shared options, the camera option first.
+            shared: The options a group uses, the unchanged photo first.
 
         Returns:
-            The first option from a reference, or the camera option when there is none.
+            The newest option from a reference, or the unchanged photo when there is none.
         """
-        for option in shared:
+        for option in reversed(shared):
             if not option.is_camera:
                 return option
         return shared[0]
@@ -1354,15 +1551,17 @@ class ProjectController(QObject):
         sample: Photo,
         options: Sequence[RefinementPipeline],
         faces: Sequence[Face],
+        sharpen: bool,
         context: TaskContext,
     ) -> tuple[str, list[VersionPreview]]:
-        """Make every option's version of a sample photo. Runs on a worker thread.
+        """Make every option's version of a sample photo, the way the export makes it. Runs on a worker thread.
 
         Args:
             group_id: Id of the group.
             sample: The sample photo.
             options: The options to apply.
             faces: The faces of the sample photo.
+            sharpen: Sharpen a little after shrinking, as the export is set to.
             context: For progress.
 
         Returns:
@@ -1373,7 +1572,7 @@ class ProjectController(QObject):
         total = len(options)
         for done, option in enumerate(options, start=1):
             pixels = self._developed_sample(sample, option, developed)
-            preview = self._make_preview(pixels, option, faces)
+            preview = self._make_preview(pixels, option, faces, sharpen)
             previews.append(preview)
             context.report(done, total)
         return group_id, previews
@@ -1386,6 +1585,8 @@ class ProjectController(QObject):
     ) -> np.ndarray:
         """The sample photo developed for an option, the way the export develops it.
 
+        darktable develops at full size and shrinks at the end, as for the
+        export; its faster preview mode shrinks first and loses fine detail.
         Options with the same darktable edit (or none) share one development,
         so the sample is developed once per edit.
 
@@ -1401,22 +1602,31 @@ class ProjectController(QObject):
         key = "" if edit is None else str(edit)
         pixels = developed.get(key)
         if pixels is None:
-            pixels = self._services.developer.develop(sample, option, self.VERSION_SIDE, False)
+            pixels = self._services.developer.develop(sample, option, self.VERSION_SIDE, True)
             developed[key] = pixels
         return pixels
 
-    def _make_preview(self, pixels: np.ndarray, option: RefinementPipeline, faces: Sequence[Face]) -> VersionPreview:
+    def _make_preview(
+        self,
+        pixels: np.ndarray,
+        option: RefinementPipeline,
+        faces: Sequence[Face],
+        sharpen: bool,
+    ) -> VersionPreview:
         """Apply one option to the sample photo's pixels.
 
         Args:
             pixels: The sample photo's pixels.
             option: The option.
             faces: The faces of the sample photo.
+            sharpen: Sharpen a little after shrinking, as the export does.
 
         Returns:
             The version, ready to show.
         """
         refined = self._services.refiner.refine(pixels, option, faces)
+        if sharpen:
+            refined = self._sharpener.sharpen(refined)
         image = self._converter.to_qimage(refined)
         description = option.describe_steps()
         return VersionPreview(option.id, option.name, description, image)
@@ -1464,7 +1674,8 @@ class ProjectController(QObject):
             return
         faces = project.faces_of(sample.id)
         options = [option]
-        job = partial(self._versions_job, group_id, sample, options, faces)
+        sharpen = project.export.sharpen
+        job = partial(self._versions_job, group_id, sample, options, faces, sharpen)
         self._tasks.start("Making your version", job, self._on_one_version_ready, self._on_task_failed)
 
     def _on_one_version_ready(self, result: tuple[str, list[VersionPreview]]) -> None:

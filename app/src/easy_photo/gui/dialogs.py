@@ -6,6 +6,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,19 +22,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from easy_photo.services.ai_words import LoginStatus
 from easy_photo.services.manifest import ProjectManifest
 from easy_photo.settings import AppSettings
 
 
 class AiSettingsDialog(QDialog):
-    """Lets the user switch Claude on or off for reading typed refinements, and set the API key and model."""
+    """Lets the user switch Claude on or off for reading typed refinements, choose the model, and log in."""
 
-    def __init__(self, settings: AppSettings, models: Sequence[tuple[str, str]], parent: QWidget | None = None) -> None:
+    login_requested = Signal()
+    """The user asked to log in to Claude Code."""
+
+    def __init__(
+        self,
+        settings: AppSettings,
+        models: Sequence[tuple[str, str]],
+        program: Path | None,
+        status: LoginStatus,
+        parent: QWidget | None = None,
+    ) -> None:
         """Create the dialog with the current settings filled in.
 
         Args:
             settings: The app's settings.
             models: The models to offer, as (model id, name for the window).
+            program: Claude Code's claude program, or None when it was not found.
+            status: Whether Claude Code is logged in.
             parent: Qt parent widget.
         """
         super().__init__(parent)
@@ -41,24 +55,36 @@ class AiSettingsDialog(QDialog):
         self.setMinimumWidth(580)
         self._enabled = QCheckBox("Let Claude read the words the app's own phrases do not cover")
         self._enabled.setChecked(settings.ai_enabled)
-        self._key = QLineEdit(settings.ai_api_key)
-        self._key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key.setPlaceholderText("sk-ant-...   (empty: use ANTHROPIC_API_KEY or an ant login)")
         self._model = QComboBox()
         for model_id, name in models:
             self._model.addItem(name, model_id)
         index = self._model.findData(settings.ai_model)
         if index >= 0:
             self._model.setCurrentIndex(index)
+        program_text = str(program) if program is not None else "not found"
+        program_label = QLabel(program_text)
+        program_label.setWordWrap(True)
+        login_text = self._login_text(status)
+        login_label = QLabel(login_text)
+        login_label.setWordWrap(True)
+        login_button = QPushButton("Log in…")
+        login_button.setEnabled(program is not None)
+        login_button.clicked.connect(self.login_requested.emit)
+        login_row = QHBoxLayout()
+        login_row.addWidget(login_label, 1)
+        login_row.addWidget(login_button)
         note = QLabel(
-            "Only the words you type are sent to Anthropic, never your photos. You can get a key at "
-            "console.anthropic.com. The key is kept in the app's settings file, which only you can read."
+            "Claude reads your words through Claude Code (the claude command), with your own Claude login, "
+            "so no API key is needed. Only the words you type are sent, never your photos, and each request "
+            "counts toward your Claude plan's usage. Without Claude Code, install it from claude.com/claude-code "
+            "and run claude once to log in."
         )
         note.setObjectName("Muted")
         note.setWordWrap(True)
         form = QFormLayout()
         form.addRow("Model", self._model)
-        form.addRow("API key", self._key)
+        form.addRow("Claude Code", program_label)
+        form.addRow("Login", login_row)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -74,15 +100,24 @@ class AiSettingsDialog(QDialog):
         return self._enabled.isChecked()
 
     @property
-    def api_key(self) -> str:
-        """The API key typed in, without spaces around it."""
-        text = self._key.text()
-        return text.strip()
-
-    @property
     def model(self) -> str:
         """The chosen model id."""
         return self._model.currentData()
+
+    def _login_text(self, status: LoginStatus) -> str:
+        """Describe the Claude Code login.
+
+        Args:
+            status: Whether Claude Code is logged in, and to which account.
+
+        Returns:
+            Text such as "Logged in as name@example.com" or "Not logged in".
+        """
+        if not status.logged_in:
+            return "Not logged in"
+        if status.account:
+            return f"Logged in as {status.account}"
+        return "Logged in"
 
 
 class NewProjectDialog(QDialog):

@@ -219,6 +219,7 @@ class MainWindow(QMainWindow):
         controller.project_closed.connect(self._show_start)
         controller.notice.connect(self._show_notice)
         controller.problem.connect(self._show_problem)
+        controller.claude_login_needed.connect(self._offer_claude_login)
         for signal in (
             controller.analysis_changed,
             controller.groups_changed,
@@ -336,17 +337,32 @@ class MainWindow(QMainWindow):
         self._controller.open_project(manifest)
 
     def _open_ai_settings(self) -> None:
-        """Let the user switch Claude on or off for typed refinements, and set its key and model."""
+        """Let the user switch Claude on or off for typed refinements, choose its model, and log in."""
         settings = self._controller.app_settings
-        dialog = AiSettingsDialog(settings, AiWordsReader.MODELS, self)
+        program = self._controller.claude_program
+        status = self._controller.claude_login_status()
+        dialog = AiSettingsDialog(settings, AiWordsReader.MODELS, program, status, self)
         dialog.accepted.connect(self._apply_ai_settings)
+        dialog.login_requested.connect(self._controller.start_claude_login)
         self._ai_dialog = dialog
         dialog.exec()
+
+    def _offer_claude_login(self) -> None:
+        """Offer to open the Claude Code login, after Claude could not read words because nobody is logged in."""
+        text = (
+            "Claude Code is installed but not logged in, so Claude cannot read your words yet.\n\n"
+            "Open a terminal window to log in now? Claude Code opens your browser to sign in to your Claude "
+            "account. When you are done, the app reads your words."
+        )
+        buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        answer = QMessageBox.question(self, "Log in to Claude Code", text, buttons)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._controller.start_claude_login()
 
     def _apply_ai_settings(self) -> None:
         """Store what the user chose in the AI settings dialog."""
         dialog = self._ai_dialog
-        self._controller.update_ai_settings(dialog.ai_enabled, dialog.api_key, dialog.model)
+        self._controller.update_ai_settings(dialog.ai_enabled, dialog.model)
 
     def _default_projects_folder(self) -> Path:
         """Where new projects go unless the user picks another folder.

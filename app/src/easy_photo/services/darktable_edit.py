@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
+from easy_photo.model.photo import FileKind
+
 
 class DarktableEditError(Exception):
     """Raised when a file holds no darktable edit that can be used."""
@@ -90,7 +92,14 @@ class DarktableEdit:
     }
     """darktable's names of common modules as its window shows them; other modules keep their own name."""
 
-    def __init__(self, path: Path, settings: dict[str, str], entries: list[HistoryEntry], left_out: list[str]) -> None:
+    def __init__(
+        self,
+        path: Path,
+        settings: dict[str, str],
+        entries: list[HistoryEntry],
+        left_out: list[str],
+        changed_by_user: bool = True,
+    ) -> None:
         """Create an edit. Use :meth:`read` to read one from a file.
 
         Args:
@@ -98,11 +107,41 @@ class DarktableEdit:
             settings: The sidecar attributes the new sidecar keeps, by their short name.
             entries: The history entries that suit other photos, in order.
             left_out: Names of the modules that were left out.
+            changed_by_user: False when darktable only added its default modules to the history.
         """
         self._path = path
         self._settings = dict(settings)
         self._entries = list(entries)
         self._left_out = list(left_out)
+        self._changed_by_user = changed_by_user
+
+    @classmethod
+    def edit_file_for(cls, reference: Path) -> Path | None:
+        """The darktable edit that a file chosen as a reference stands for.
+
+        Args:
+            reference: A file the user chose as a reference.
+
+        Returns:
+            The file itself when it is an XMP file; the sidecar of a raw file
+            when the user changed that photo in darktable; otherwise None.
+        """
+        suffix = reference.suffix.lower()
+        if suffix == ".xmp":
+            return reference
+        kind = FileKind.of(reference)
+        if kind is not FileKind.RAW:
+            return None
+        sidecar = reference.with_name(f"{reference.name}.xmp")
+        if not sidecar.exists():
+            return None
+        try:
+            edit = cls.read(sidecar)
+        except DarktableEditError:
+            return None
+        if not edit.changed_by_user:
+            return None
+        return sidecar
 
     @classmethod
     def read(cls, path: Path) -> DarktableEdit:
@@ -139,7 +178,8 @@ class DarktableEdit:
             raise DarktableEditError(f"The darktable history in {path.name} cannot be read: {error}") from error
         if not entries:
             raise DarktableEditError(f"{path.name} has no darktable edit that suits other photos.")
-        return cls(path, settings, entries, left_out)
+        changed_by_user = cls._changed_by_user(description)
+        return cls(path, settings, entries, left_out, changed_by_user)
 
     @classmethod
     def qualified(cls, name: str) -> str:
@@ -171,6 +211,11 @@ class DarktableEdit:
     def left_out(self) -> list[str]:
         """Names of the modules that were left out, each once."""
         return list(self._left_out)
+
+    @property
+    def changed_by_user(self) -> bool:
+        """False when darktable only added its default modules, and the user never edited the photo."""
+        return self._changed_by_user
 
     def describe(self) -> str:
         """List the modules the edit applies, as darktable's window names them.
@@ -249,6 +294,30 @@ class DarktableEdit:
             if value is not None:
                 settings[name] = value
         return settings
+
+    @classmethod
+    def _changed_by_user(cls, description: ElementTree.Element) -> bool:
+        """Tell whether the user changed the history, or darktable only set it up.
+
+        darktable stores a hash of the history as it is now, of the history
+        right after it added its default modules, and of the bare history. When
+        the current hash equals one of the other two, the user changed nothing.
+
+        Args:
+            description: The sidecar's rdf:Description element.
+
+        Returns:
+            True when the user changed the history, or when the sidecar has no hashes to tell.
+        """
+        current_name = cls.qualified("history_current_hash")
+        automatic_name = cls.qualified("history_auto_hash")
+        basic_name = cls.qualified("history_basic_hash")
+        current = description.get(current_name)
+        if current is None:
+            return True
+        automatic = description.get(automatic_name)
+        basic = description.get(basic_name)
+        return current not in (automatic, basic)
 
     @classmethod
     def _sort_entries(cls, items: list[ElementTree.Element], end: int) -> tuple[list[HistoryEntry], list[str]]:

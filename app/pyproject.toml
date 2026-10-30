@@ -16,7 +16,6 @@ dependencies = [
     "Pillow>=10.1",
     "rawpy>=0.19",
     "platformdirs>=4.0",
-    "anthropic>=2.0",
 ]
 
 [project.optional-dependencies]

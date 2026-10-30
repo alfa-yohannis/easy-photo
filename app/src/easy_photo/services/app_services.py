@@ -80,7 +80,7 @@ class AppServices:
         manifest = ProjectManifest(catalog)
         history_path = folders.data / "history.jsonl"
         history_log = HistoryLog(history_path)
-        ai_reader = AiWordsReader(catalog, settings.ai_api_key, settings.ai_model)
+        ai_reader = AiWordsReader.locate(catalog, settings.claude_cli, settings.ai_model)
         return cls(
             finder,
             reader,

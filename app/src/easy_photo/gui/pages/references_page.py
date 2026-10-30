@@ -1,11 +1,12 @@
-"""Step 4: the user adds references; each one becomes a refinement option, used for the groups the user chooses."""
+"""Step 4: the user adds references for each group; each one becomes a refinement option."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -31,9 +32,11 @@ from easy_photo.wording import count_text
 class ReferencesPage(WorkflowPage):
     """Step 4: references from the user's history, the internet, examples, or their own words.
 
-    Each reference becomes a refinement option. An option is shown in the
-    Refine step for every group, unless the user turns it off for some groups
-    here. The unchanged photo is always an option.
+    Each group has its own references: the user chooses a group in the
+    "References for" box, and what they add becomes a refinement option for
+    that group only. Choosing "All groups" adds an option for every group.
+    Removing an option while a group is chosen takes it out of that group
+    only. The unchanged photo is always an option.
     """
 
     ai_settings_requested = Signal()
@@ -50,16 +53,16 @@ class ReferencesPage(WorkflowPage):
             controller,
             style,
             "References",
-            "Show the app what you like. Each reference becomes a refinement option that you compare on your "
-            "photos in the next step, for the groups you choose. The unchanged photo is always one of the "
-            "options.",
+            "Show the app what you like, group by group. Each reference becomes a refinement option that you "
+            "compare on the group's photos in the next step. The unchanged photo is always one of the options.",
             parent,
         )
-        self._filling = False
         content = QWidget(self)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
+        target_row = self._make_target_row()
+        layout.addLayout(target_row)
         cards = QGridLayout()
         cards.setHorizontalSpacing(14)
         cards.setVerticalSpacing(14)
@@ -77,7 +80,8 @@ class ReferencesPage(WorkflowPage):
         self.set_content(content)
         controller.project_opened.connect(self.on_shown)
         controller.pipelines_changed.connect(self._refresh_options)
-        controller.groups_changed.connect(self._refresh_option_groups)
+        controller.groups_changed.connect(self._refresh_targets)
+        controller.option_groups_changed.connect(self._on_option_groups_changed)
         controller.words_answered.connect(self._on_words_answered)
         controller.ai_changed.connect(self._refresh_ai_note)
 
@@ -105,12 +109,30 @@ class ReferencesPage(WorkflowPage):
         return count_text(count, "option")
 
     def on_shown(self) -> None:
-        """Show the current options, whether darktable-cli is there, and whether Claude can read words."""
-        self._refresh_options()
+        """Show the groups, their options, whether darktable-cli is there, and whether Claude can read words."""
+        self._refresh_targets()
         self._refresh_darktable_note()
         self._refresh_ai_note()
 
     # ------------------------------------------------------------------ cards
+
+    def _make_target_row(self) -> QHBoxLayout:
+        """The row that chooses the group whose references are shown and added.
+
+        Returns:
+            The row.
+        """
+        label = self.make_label("References for", "SectionTitle")
+        self._target = QComboBox()
+        self._target.setMinimumWidth(320)
+        self._target.currentIndexChanged.connect(self._on_target_changed)
+        self._target_note = self.make_label("", "Muted")
+        self._target_note.setWordWrap(True)
+        row = QHBoxLayout()
+        row.addWidget(label)
+        row.addWidget(self._target)
+        row.addWidget(self._target_note, 1)
+        return row
 
     def _make_history_card(self) -> Card:
         """The card for photos the user picked before.
@@ -161,8 +183,9 @@ class ReferencesPage(WorkflowPage):
         """
         card = Card(
             "Examples",
-            "Photos you edited or like right now; the app learns how bright they are. Add a darktable sidecar "
-            "(.xmp file) to apply that edit itself: darktable-cli develops every raw photo with it.",
+            "Photos you edited or like right now. A raw file you edited in darktable, or its .xmp sidecar, "
+            "becomes your darktable edit, applied to every raw photo of the group. Other photos teach the "
+            "app how bright you like them.",
         )
         self._darktable_note = self.make_label("", "Muted")
         self._darktable_note.setWordWrap(True)
@@ -220,85 +243,107 @@ class ReferencesPage(WorkflowPage):
         self._options_list = QListWidget(section)
         self._options_list.setWordWrap(True)
         self._options_list.currentItemChanged.connect(self._on_option_chosen)
-        remove_button = self.make_button("Remove selected option", self._remove_option)
+        self._remove_button = self.make_button("Remove option", self._remove_option)
         remove_row = QHBoxLayout()
         remove_row.addStretch(1)
-        remove_row.addWidget(remove_button)
-        options_column = QVBoxLayout()
-        options_column.addWidget(options_title)
-        options_column.addWidget(self._options_list, 1)
-        options_column.addLayout(remove_row)
-        groups_title = self.make_label("Used for these groups", "SectionTitle")
-        self._groups_note = self.make_label("", "Muted")
-        self._groups_note.setWordWrap(True)
-        self._groups_list = QListWidget(section)
-        self._groups_list.itemChanged.connect(self._on_group_checked)
-        all_button = self.make_button("All groups", self._use_for_all_groups)
-        none_button = self.make_button("No groups", self._use_for_no_groups)
-        group_buttons = QHBoxLayout()
-        group_buttons.addWidget(all_button)
-        group_buttons.addWidget(none_button)
-        group_buttons.addStretch(1)
-        groups_column = QVBoxLayout()
-        groups_column.addWidget(groups_title)
-        groups_column.addWidget(self._groups_note)
-        groups_column.addWidget(self._groups_list, 1)
-        groups_column.addLayout(group_buttons)
-        layout = QHBoxLayout(section)
+        remove_row.addWidget(self._remove_button)
+        layout = QVBoxLayout(section)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
-        layout.addLayout(options_column, 3)
-        layout.addLayout(groups_column, 2)
+        layout.addWidget(options_title)
+        layout.addWidget(self._options_list, 1)
+        layout.addLayout(remove_row)
         return section
 
     # -------------------------------------------------------------- refreshes
 
+    def _refresh_targets(self) -> None:
+        """List "All groups" and every group in the "References for" box, keeping the chosen one.
+
+        Until the user chooses, the first group is chosen, since each group has its own references.
+        """
+        previous = self._target.currentData()
+        self._target.blockSignals(True)
+        self._target.clear()
+        self._target.addItem("All groups", "")
+        project = self._controller.project
+        groups = project.groups if project is not None else []
+        for group in groups:
+            photos_text = count_text(group.size, "photo")
+            text = f"{group.title} ({photos_text}, {group.details})"
+            self._target.addItem(text, group.id)
+        index = -1
+        if previous is not None:
+            index = self._target.findData(previous)
+        if index < 0:
+            index = 1 if groups else 0
+        self._target.setCurrentIndex(index)
+        self._target.blockSignals(False)
+        self._refresh_target_note()
+        self._refresh_options()
+
+    def _refresh_target_note(self) -> None:
+        """Say who new references are for."""
+        project = self._controller.project
+        has_groups = project is not None and bool(project.groups)
+        if not has_groups:
+            text = "Make groups first. Until then every reference is for every group."
+        elif self._target_group_id() is None:
+            text = "New references are for every group."
+        else:
+            text = "New references are for this group only."
+        self._target_note.setText(text)
+
     def _refresh_options(self) -> None:
-        """Show the project's refinement options, keeping the selected one."""
+        """Show the refinement options of the chosen group (or all of them), keeping the selected one."""
         chosen = self._chosen_option_id()
+        group_id = self._target_group_id()
         self._options_list.blockSignals(True)
         self._options_list.clear()
         project = self._controller.project
         if project is not None:
             for option in project.pipelines:
+                if group_id is not None and not project.option_used_in(group_id, option.id):
+                    continue
                 steps = option.describe_steps()
-                text = f"{option.name}\n{steps}"
+                scope = self._scope_text(option.id)
+                text = f"{option.name}\n{steps}\n{scope}"
                 item = QListWidgetItem(text)
                 item.setData(Qt.ItemDataRole.UserRole, option.id)
                 item.setToolTip(option.details)
                 self._options_list.addItem(item)
         self._options_list.blockSignals(False)
         self._select_option(chosen)
-        self._refresh_option_groups()
+        self._refresh_remove_button()
         self.readiness_changed.emit()
 
-    def _refresh_option_groups(self) -> None:
-        """Tick the groups the selected option is used for."""
+    def _scope_text(self, option_id: str) -> str:
+        """Say which groups an option is for.
+
+        Args:
+            option_id: Id of the option.
+
+        Returns:
+            Text such as "For every group" or "For Group 2, Group 3".
+        """
         project = self._controller.project
+        groups = project.groups
+        titles = [group.title for group in groups if project.option_used_in(group.id, option_id)]
+        if len(titles) == len(groups):
+            return "For every group"
+        if not titles:
+            return "For no group"
+        joined = ", ".join(titles)
+        return f"For {joined}"
+
+    def _refresh_remove_button(self) -> None:
+        """Name the remove button after what it does, and switch it off for the unchanged photo."""
         option_id = self._chosen_option_id()
-        self._filling = True
-        self._groups_list.clear()
-        has_groups = project is not None and bool(project.groups)
-        is_camera = option_id == RefinementPipeline.CAMERA_ID
-        if not has_groups:
-            self._groups_note.setText("Make groups first. Until then every option is used for every group.")
-        elif is_camera:
-            self._groups_note.setText("The unchanged photo is always an option.")
-        elif not option_id:
-            self._groups_note.setText("Select an option to choose its groups.")
-        else:
-            self._groups_note.setText("Untick a group to leave this option out of its comparison.")
-        if has_groups and option_id:
-            for group in project.groups:
-                item = QListWidgetItem(group.title)
-                item.setData(Qt.ItemDataRole.UserRole, group.id)
-                used = project.option_used_in(group.id, option_id)
-                state = Qt.CheckState.Checked if used else Qt.CheckState.Unchecked
-                item.setCheckState(state)
-                if is_camera:
-                    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-                self._groups_list.addItem(item)
-        self._filling = False
+        removable = bool(option_id) and option_id != RefinementPipeline.CAMERA_ID
+        self._remove_button.setEnabled(removable)
+        if self._target_group_id() is None:
+            self._remove_button.setText("Remove option")
+            return
+        self._remove_button.setText("Remove from this group")
 
     def _refresh_darktable_note(self) -> None:
         """Say whether raw files are developed with darktable and .xmp files can be used."""
@@ -314,36 +359,63 @@ class ReferencesPage(WorkflowPage):
         """Say whether Claude reads the words the app's own phrases do not cover."""
         controller = self._controller
         if controller.ai_ready:
-            text = "Words the app does not know are read by Claude. Only your words are sent, never your photos."
+            text = (
+                "Words the app does not know are read by Claude, through Claude Code. Only your words are sent, "
+                "never your photos."
+            )
         elif controller.ai_enabled:
-            text = "Add an Anthropic API key to let Claude read any words, not only the app's own phrases."
+            text = "Install Claude Code and log in to let Claude read any words, not only the app's own phrases."
         else:
             text = "Claude is switched off; only the app's own phrases are understood."
         self._ai_note.setText(text)
 
     # ---------------------------------------------------------------- actions
 
+    def _on_target_changed(self, _index: int) -> None:
+        """Show the options of the newly chosen group.
+
+        Args:
+            _index: Row of the chosen entry (read again through :meth:`_target_group_id`).
+        """
+        self._refresh_target_note()
+        self._refresh_options()
+
+    def _on_option_groups_changed(self, _group_id: str) -> None:
+        """Show the options again after an option was taken out of a group.
+
+        The refresh waits until the click that caused it is handled, because
+        it rebuilds the list the click came from.
+
+        Args:
+            _group_id: Id of the group (not used; every option's text is made again).
+        """
+        QTimer.singleShot(0, self._refresh_options)
+
     def _add_history_folder(self) -> None:
         """Pick a folder of photos the user picked before."""
         folder = QFileDialog.getExistingDirectory(self, "Choose a folder of photos you picked before")
         if folder:
             path = Path(folder)
-            self._controller.add_history([path])
+            group_id = self._target_group_id()
+            self._controller.add_history([path], group_id)
 
     def _add_history_files(self) -> None:
         """Pick photos the user picked before."""
         paths = self._pick_photos("Choose photos you picked before")
-        self._controller.add_history(paths)
+        group_id = self._target_group_id()
+        self._controller.add_history(paths, group_id)
 
     def _add_examples(self) -> None:
         """Pick example files."""
-        paths = self._pick_photos("Choose example photos")
-        self._controller.add_examples(paths)
+        paths = self._pick_photos("Choose example photos or darktable edits")
+        group_id = self._target_group_id()
+        self._controller.add_examples(paths, group_id)
 
     def _search(self) -> None:
         """Search the internet for the phrase in the search box."""
         query = self._query.text()
-        self._controller.search_internet(query)
+        group_id = self._target_group_id()
+        self._controller.search_internet(query, group_id)
 
     def _add_words(self) -> None:
         """Make an option from the typed words; the answer arrives in :meth:`_on_words_answered`."""
@@ -351,7 +423,8 @@ class ReferencesPage(WorkflowPage):
         if not text.strip():
             return
         self._show_words_note("Reading your words…", False)
-        self._controller.add_words(text)
+        group_id = self._target_group_id()
+        self._controller.add_words(text, group_id)
 
     def _on_words_answered(self, target: str, worked: bool, message: str) -> None:
         """Show how typed words were read, when they were typed on this page.
@@ -391,63 +464,40 @@ class ReferencesPage(WorkflowPage):
             "Type one or more changes, separated by commas or \"and\". Start a change with \"slightly\" or "
             "\"much\" to make it weaker or stronger, or give a number. The app understands these by itself:\n\n"
             f"{listing}\n\n"
-            "With an Anthropic API key in the AI settings, Claude also reads anything else you type, in any "
-            "language."
+            "With Claude Code installed and logged in, Claude also reads anything else you type, in any language."
         )
         QMessageBox.information(self, "What can I type?", text)
 
     def _remove_option(self) -> None:
-        """Remove the selected option."""
+        """Take the selected option out of the chosen group, or remove it from every group under "All groups"."""
         option_id = self._chosen_option_id()
-        if option_id:
+        if not option_id:
+            return
+        group_id = self._target_group_id()
+        if group_id is None:
             self._controller.remove_pipeline(option_id)
+            return
+        self._controller.remove_option_from_group(group_id, option_id)
 
     def _on_option_chosen(self, _current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
-        """Show the groups of the newly selected option.
+        """Update the remove button for the newly selected option.
 
         Args:
             _current: The selected item (read again through :meth:`_chosen_option_id`).
             _previous: The item selected before (not used).
         """
-        self._refresh_option_groups()
-
-    def _on_group_checked(self, item: QListWidgetItem) -> None:
-        """Turn the selected option on or off for the group the user ticked or unticked.
-
-        Args:
-            item: The group's list item.
-        """
-        if self._filling:
-            return
-        option_id = self._chosen_option_id()
-        if not option_id:
-            return
-        group_id = item.data(Qt.ItemDataRole.UserRole)
-        used = item.checkState() == Qt.CheckState.Checked
-        self._controller.set_option_used(group_id, option_id, used)
-
-    def _use_for_all_groups(self) -> None:
-        """Use the selected option for every group."""
-        self._set_all_groups(Qt.CheckState.Checked)
-
-    def _use_for_no_groups(self) -> None:
-        """Leave the selected option out of every group."""
-        self._set_all_groups(Qt.CheckState.Unchecked)
-
-    def _set_all_groups(self, state: Qt.CheckState) -> None:
-        """Tick or untick every group of the selected option.
-
-        Args:
-            state: Checked or unchecked.
-        """
-        if self._chosen_option_id() == RefinementPipeline.CAMERA_ID:
-            return
-        count = self._groups_list.count()
-        for row in range(count):
-            item = self._groups_list.item(row)
-            item.setCheckState(state)
+        self._refresh_remove_button()
 
     # ---------------------------------------------------------------- helpers
+
+    def _target_group_id(self) -> str | None:
+        """The group chosen in the "References for" box.
+
+        Returns:
+            Its id, or None for "All groups".
+        """
+        group_id = self._target.currentData()
+        return group_id or None
 
     def _chosen_option_id(self) -> str:
         """The id of the selected option.

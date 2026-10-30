@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageCms, ImageFilter
+from PIL import Image, ImageCms
 
 from easy_photo.model.face import Face
 from easy_photo.model.photo import Photo
@@ -18,6 +18,7 @@ from easy_photo.refinement.pipeline import RefinementPipeline
 from easy_photo.services.developer import DevelopError, PhotoDeveloper
 from easy_photo.services.photo_reader import PhotoReader, PhotoReadError
 from easy_photo.services.refiner import Refiner
+from easy_photo.services.sharpener import Sharpener
 from easy_photo.settings import ExportSettings
 
 
@@ -44,19 +45,13 @@ class Exporter:
 
     Raw files are developed at the export size from their raw data (see
     :class:`PhotoDeveloper`), so the JPEG is compressed only once, at the end.
-    Shrinking softens fine detail a little; an optional light sharpen brings
-    it back.
+    Shrinking softens fine detail a little; an optional light sharpen (see
+    :class:`Sharpener`) brings it back.
 
     Each file is written under a temporary name first and only gets its real
     name when that name is still free, so a stopped export never leaves a
     half-written photo behind.
     """
-
-    SHARPEN_RADIUS = 0.75
-    SHARPEN_PERCENT = 75
-    SHARPEN_THRESHOLD = 2
-    """The light sharpen: radius 0.75 pixel, strength 75 %, and no change where neighbours differ
-    by 2 levels or less, so smooth areas and noise stay as they are."""
 
     EDIT_LEFT_OUT = "without the darktable edit, which is only applied to raw files"
 
@@ -71,6 +66,7 @@ class Exporter:
         self._reader = reader
         self._developer = developer
         self._refiner = refiner
+        self._sharpener = Sharpener()
         profile = ImageCms.createProfile("sRGB")
         wrapped = ImageCms.ImageCmsProfile(profile)
         self._srgb_profile = wrapped.tobytes()
@@ -157,10 +153,9 @@ class Exporter:
         target.parent.mkdir(parents=True, exist_ok=True)
         unique = uuid.uuid4().hex
         temporary = target.with_name(f".{target.stem}.{unique}.part")
-        image = Image.fromarray(pixels)
         if settings.sharpen:
-            sharpen = ImageFilter.UnsharpMask(self.SHARPEN_RADIUS, self.SHARPEN_PERCENT, self.SHARPEN_THRESHOLD)
-            image = image.filter(sharpen)
+            pixels = self._sharpener.sharpen(pixels)
+        image = Image.fromarray(pixels)
         options: dict = {"quality": settings.quality, "optimize": True, "icc_profile": self._srgb_profile}
         if settings.quality >= 90:
             # Full color resolution; at high quality, halving it would waste the quality.

@@ -11,7 +11,6 @@ on Ubuntu, and ``%LOCALAPPDATA%`` on Windows.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -100,8 +99,8 @@ class AppSettings:
     ai_enabled: bool = True
     """Ask Claude to read the words the app's own phrases do not cover."""
 
-    ai_api_key: str = ""
-    """Anthropic API key. Empty means the key from the environment or from an ``ant auth login`` profile."""
+    claude_cli: str = ""
+    """Path of Claude Code's claude program. Empty means look for it on the PATH and in ~/.local/bin."""
 
     ai_model: str = "claude-opus-5-5"
     """The Claude model that reads the user's words."""
@@ -233,8 +232,3 @@ class SettingsStore:
         data = asdict(settings)
         text = json.dumps(data, indent=2)
         self._path.write_text(text, encoding="utf-8")
-        try:
-            # The file can hold an API key, so only its owner may read it (Windows ignores this).
-            os.chmod(self._path, 0o600)
-        except OSError:
-            pass

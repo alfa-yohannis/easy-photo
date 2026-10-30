@@ -83,8 +83,8 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     controller = app.controller
     window = app.window
     window.show()
-    # Claude stays out of this test, so it never needs a key or the network.
-    controller.update_ai_settings(False, "", AiWordsReader.DEFAULT_MODEL)
+    # Claude stays out of this test, so it never starts Claude Code or uses the network.
+    controller.update_ai_settings(False, AiWordsReader.DEFAULT_MODEL)
     write_test_photos(photo_maker)
     folder = tmp_path / "projects" / "Test"
     controller.create_project("Test", folder)
@@ -124,6 +124,10 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     assert answers[1][1] is False
     assert "Not understood" in answers[1][2]
     first_group, second_group = project.groups
+    controller.add_words("warmer", second_group.id)
+    group_option = project.pipelines[-1]
+    assert project.option_used_in(second_group.id, group_option.id)
+    assert not project.option_used_in(first_group.id, group_option.id)
     controller.render_versions(first_group.id)
     options = controller.options_for(first_group.id)
     wanted = len(options)
@@ -142,7 +146,7 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     words_option = options[1]
     controller.choose(first_group.id, words_option.id)
     controller.try_words(second_group.id, None, "slightly darker")
-    assert answers[2] == (second_group.id, True, "")
+    assert answers[3] == (second_group.id, True, "")
     assert project.choice_of(second_group.id).pipeline_id.startswith("typed-")
 
     export_folder = tmp_path / "export"

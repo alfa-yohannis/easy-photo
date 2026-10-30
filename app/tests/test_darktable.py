@@ -54,16 +54,24 @@ def blend_text(mask_mode: int, packed: bool) -> str:
     return f"gz11{ascii_text}"
 
 
-def write_sidecar(folder: Path, entries: list[tuple[str, str]], history_end: int) -> Path:
+def write_sidecar(
+    folder: Path,
+    entries: list[tuple[str, str]],
+    history_end: int,
+    name: str = "P1000001.RW2.xmp",
+    hashes: str = "",
+) -> Path:
     """Write a darktable sidecar file with a history.
 
     Args:
         folder: Where the file goes.
         entries: (module, blend settings text) for each history entry, in order.
         history_end: darktable's history end; entries from this number on count as undone.
+        name: File name.
+        hashes: darktable's history hash attributes, written as they are; empty for none.
 
     Returns:
-        The file, named P1000001.RW2.xmp.
+        The file.
     """
     items: list[str] = []
     for number, (operation, blend) in enumerate(entries):
@@ -84,7 +92,8 @@ def write_sidecar(folder: Path, entries: list[tuple[str, str]], history_end: int
    darktable:xmp_version="5"
    darktable:auto_presets_applied="1"
    darktable:history_end="{history_end}"
-   darktable:iop_order_version="2">
+   darktable:iop_order_version="2"
+   {hashes}>
    <darktable:masks_history>
     <rdf:Seq>
      <rdf:li darktable:mask_num="1"/>
@@ -99,7 +108,7 @@ def write_sidecar(folder: Path, entries: list[tuple[str, str]], history_end: int
  </rdf:RDF>
 </x:xmpmeta>
 """
-    path = folder / "P1000001.RW2.xmp"
+    path = folder / name
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -227,6 +236,29 @@ def test_edit_refuses_files_without_a_darktable_history(tmp_path: Path) -> None:
     for path in [other, broken, crop_only]:
         with pytest.raises(DarktableEditError):
             DarktableEdit.read(path)
+
+
+def test_a_raw_file_stands_for_its_edit_only_when_the_user_edited_it(tmp_path: Path) -> None:
+    """A raw file counts as a darktable edit when its sidecar's history is not what darktable set up."""
+    plain = blend_text(0, False)
+    entries = [("exposure", plain)]
+    edited_raw = tmp_path / "P1000004.RW2"
+    edited_raw.write_bytes(b"raw")
+    edited_hashes = 'darktable:history_auto_hash="aaaa" darktable:history_current_hash="bbbb"'
+    edited_sidecar = write_sidecar(tmp_path, entries, 1, "P1000004.RW2.xmp", edited_hashes)
+    untouched_raw = tmp_path / "P1000005.RW2"
+    untouched_raw.write_bytes(b"raw")
+    untouched_hashes = 'darktable:history_auto_hash="aaaa" darktable:history_current_hash="aaaa"'
+    write_sidecar(tmp_path, entries, 1, "P1000005.RW2.xmp", untouched_hashes)
+    bare_raw = tmp_path / "P1000006.RW2"
+    bare_raw.write_bytes(b"raw")
+    picture = tmp_path / "P1000007.jpg"
+    picture.write_bytes(b"jpeg")
+    assert DarktableEdit.edit_file_for(edited_raw) == edited_sidecar
+    assert DarktableEdit.edit_file_for(edited_sidecar) == edited_sidecar
+    assert DarktableEdit.edit_file_for(untouched_raw) is None
+    assert DarktableEdit.edit_file_for(bare_raw) is None
+    assert DarktableEdit.edit_file_for(picture) is None
 
 
 def test_developer_applies_the_edit_to_raw_files_with_darktable(tmp_path: Path) -> None:

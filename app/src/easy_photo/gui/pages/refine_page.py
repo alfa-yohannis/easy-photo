@@ -179,7 +179,7 @@ class RefinePage(WorkflowPage):
         row.addWidget(next_button)
         hint = self.make_label(
             "Your words are added on top of the version you picked; with no pick, on top of the unchanged photo. "
-            "Words the app does not know are read by Claude when an API key is set. Keys 1 to 9 pick a version.",
+            "Words the app does not know are read by Claude, through Claude Code. Keys 1 to 9 pick a version.",
             "Muted",
         )
         hint.setWordWrap(True)
