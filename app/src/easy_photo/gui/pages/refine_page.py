@@ -20,10 +20,12 @@ from PySide6.QtWidgets import (
 )
 
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.file_locations import FileLocations
 from easy_photo.gui.pages.base_page import WorkflowPage
 from easy_photo.gui.style import AppStyle
 from easy_photo.gui.widgets.version_card import VersionCard
 from easy_photo.refinement.pipeline import RefinementPipeline
+from easy_photo.wording import count_text
 
 
 class RefinePage(WorkflowPage):
@@ -129,6 +131,17 @@ class RefinePage(WorkflowPage):
         self._title = self.make_label("", "SectionTitle")
         self._info = self.make_label("", "Muted")
         self._info.setWordWrap(True)
+        self._recalculate_button = self.make_button("Recalculate   (F5)", self._recalculate)
+        self._recalculate_button.setToolTip(
+            "Make the versions again, for example after you changed a darktable edit in darktable."
+        )
+        self._locations = FileLocations()
+        self._show_sample_button = self.make_button("Show photo in folder", self._show_sample_in_folder)
+        self._show_sample_button.setToolTip("Show the photo the versions are made on in the file manager.")
+        title_row = QHBoxLayout()
+        title_row.addWidget(self._title, 1)
+        title_row.addWidget(self._show_sample_button)
+        title_row.addWidget(self._recalculate_button)
         self._cards_area = QScrollArea(column)
         self._cards_area.setWidgetResizable(True)
         self._cards_holder = QWidget()
@@ -141,7 +154,7 @@ class RefinePage(WorkflowPage):
         self._waiting = self.make_label("", "Muted")
         self._waiting.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bottom = self._make_words_panel(column)
-        layout.addWidget(self._title)
+        layout.addLayout(title_row)
         layout.addWidget(self._info)
         layout.addWidget(self._waiting)
         layout.addWidget(self._cards_area, 1)
@@ -190,13 +203,31 @@ class RefinePage(WorkflowPage):
         return panel
 
     def _add_shortcuts(self) -> None:
-        """Keys 1 to 9 pick the version with that number."""
+        """Keys 1 to 9 pick the version with that number; F5 makes the versions again."""
         for number in range(1, self.MAX_NUMBER_KEYS + 1):
             sequence = QKeySequence(f"{number}")
             shortcut = QShortcut(sequence, self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             handler = partial(self._pick_number, number)
             shortcut.activated.connect(handler)
+        refresh_key = QKeySequence("F5")
+        refresh_shortcut = QShortcut(refresh_key, self)
+        refresh_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        refresh_shortcut.activated.connect(self._recalculate)
+
+    def _show_sample_in_folder(self) -> None:
+        """Show the photo the chosen group's versions are made on, in its folder in the file manager."""
+        sample = self._controller.sample_photo(self._group_id)
+        if sample is not None:
+            self._locations.show_in_folder(sample.path)
+
+    def _recalculate(self) -> None:
+        """Make the chosen group's versions again; the cards show "Making the versions…" meanwhile."""
+        group_id = self._group_id
+        if not group_id:
+            return
+        self._controller.recalculate_versions(group_id)
+        self._show_group(group_id)
 
     # ----------------------------------------------------------------- groups
 
@@ -300,15 +331,16 @@ class RefinePage(WorkflowPage):
         self._show_words_note("", False)
         project = self._controller.project
         group = project.group(group_id) if project is not None and group_id else None
+        self._recalculate_button.setEnabled(group is not None)
+        self._show_sample_button.setEnabled(group is not None)
         if group is None:
             self._title.setText("No groups yet")
             self._info.setText("Make groups in the Group step first.")
             self._show_cards([])
             return
-        sample = project.photo(group.sample_id)
-        sample_name = sample.name if sample is not None else "the first photo"
         self._title.setText(group.title)
-        self._info.setText(f"Shown on {sample_name}, the sharpest of its {group.size} photos.")
+        info = self._sample_text(group_id)
+        self._info.setText(info)
         versions = self._controller.versions(group_id)
         if versions:
             self._show_cards(versions)
@@ -318,6 +350,30 @@ class RefinePage(WorkflowPage):
         self._waiting.setVisible(True)
         if self.isVisible():
             self._controller.render_versions(group_id)
+
+    def _sample_text(self, group_id: str) -> str:
+        """Say which photo the versions are shown on, and why that one.
+
+        Args:
+            group_id: Id of the group.
+
+        Returns:
+            Text such as "Shown on P1209977.RW2, the sharpest of its 12 selected photos."
+        """
+        project = self._controller.project
+        group = project.group(group_id)
+        sample = self._controller.sample_photo(group_id)
+        if sample is None:
+            return "None of this group's photos is in the project any more."
+        selected = project.selected_photos_of(group)
+        if not selected:
+            return (
+                f"Shown on {sample.name}. None of the group's {group.size} photos is selected, "
+                "so the group is not exported."
+            )
+        selected_count = len(selected)
+        selected_text = count_text(selected_count, "selected photo")
+        return f"Shown on {sample.name}, the sharpest of its {selected_text}."
 
     # ------------------------------------------------------------------ cards
 

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from easy_photo.gui.application import EasyPhotoApp
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.pages.refine_page import RefinePage
 from easy_photo.model.quality import Decision
 from easy_photo.services.ai_words import AiWordsReader
 from easy_photo.services.manifest import ProjectManifest
@@ -143,6 +144,24 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
 
     ready = wait_until(versions_made)
     assert ready
+    controller.recalculate_versions(first_group.id)
+    controller.recalculate_versions(first_group.id)
+    assert controller.versions(first_group.id) == []
+    remade = wait_until(versions_made)
+    assert remade
+    sample_before = controller.sample_photo(first_group.id)
+    controller.select_photos([sample_before.id], False)
+    sample_after = controller.sample_photo(first_group.id)
+    assert sample_after.id != sample_before.id
+    assert controller.versions(first_group.id) == []
+    window.go_to(4)
+    refine_page = window.findChild(RefinePage)
+    shown_text = refine_page._info.text()
+    assert sample_after.name in shown_text
+    assert "2 selected photos" in shown_text
+    remade_on_new_sample = wait_until(versions_made)
+    assert remade_on_new_sample
+    controller.select_photos([sample_before.id], True)
     words_option = options[1]
     controller.choose(first_group.id, words_option.id)
     controller.rename_group(first_group.id, "  Sunrise  ")
@@ -192,5 +211,17 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     assert reopened.choice_of(second_group.id).pipeline_id.startswith("typed-")
     assert reopened.groups[0].title == "Sunrise"
     assert not reopened.option_used_in(first_group.id, words_option.id)
+
+    controller.remove_groups([second_group.id])
+    remaining_ids = [group.id for group in reopened.groups]
+    second_photos = set(second_group.photo_ids)
+    planned = controller.export_plan()
+    planned_ids = {photo.id for photo, _option in planned.items}
+    assert remaining_ids == [first_group.id]
+    assert reopened.pipeline(group_option.id) is None
+    # Turned off for the first group above, the shared words option was the second group's alone.
+    assert reopened.pipeline(words_option.id) is None
+    assert reopened.choice_of(second_group.id) is None
+    assert not planned_ids & second_photos
     wait_until(lambda: not controller.tasks.is_busy)
     controller.close_project()

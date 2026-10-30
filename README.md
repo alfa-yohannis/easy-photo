@@ -56,6 +56,8 @@ Measurements are not stored in the manifest. They are made again when a project 
 
 While a step works through files, the progress bar in the status bar names the file it is on and how far it is, such as `P1188489.RW2  3 / 6`; the Stop button ends the job after the current file.
 
+Right-click any photo tile for "Open the file" (in the program your system uses for it) or "Show in folder" (Explorer on Windows, or the file manager on Linux, with the file selected where the file manager supports it). The Filter step has the same two buttons under the large photo, the Refine step has "Show photo in folder" for the photo its versions are made on, and in the Export results a double click shows the exported file in its folder.
+
 ### 1. Source
 
 Drop folders or photos on the window, or browse for them. While you filter and group, raw files (RW2, CR3, NEF, ARW, DNG and others) are shown from the JPEG picture the camera stored inside each one, read with [rawpy](https://github.com/letmaik/rawpy) (LibRaw). That takes about 70 to 100 ms per photo, measuring included. The Refine previews and the export develop the raw data itself with darktable (see Export).
@@ -77,9 +79,11 @@ Photos are grouped one of two ways:
 - Similar photos: neighbouring photos share a group when the pause between them is short (10 minutes by default) and they look alike (colors and rough layout).
 - Same people: the app finds faces with YuNet, describes them with SFace, and sorts them into people. Photos with the same people form a group. You can rename people and merge two that are the same person.
 
-The sharpest photo of each group stands for it in the next steps. Within a group you can select and unselect photos one by one (K and X) or all at once; unselected photos stay in the group but are not exported.
+The sharpest of a group's selected photos stands for it in the list and in the Refine step. Within a group you can select and unselect photos one by one (K and X) or all at once; unselected photos stay in the group but are not exported, and when you unselect the sharpest one, the next sharpest takes its place.
 
 Rename a group with "Rename group…" under the group list, F2 or a double click; the References step has the same button next to "References for". A name you give stays when people are renamed, and its picks and references stay with it. Making the groups again starts over with new groups and names.
+
+Remove groups you do not want with "Remove…" (or the Delete key); Ctrl and Shift select several at once, and the References step has a "Remove group…" button too. The app asks first. A removed group's photos stay in the project but are not exported; its pick, its typed versions and the references made only for it go with it. Making the groups again brings the photos back into groups.
 
 ### 4. References
 
@@ -97,13 +101,13 @@ The unchanged photo is always an option too: darktable's development of it (with
 
 ### 5. Refine
 
-For each group, its options are shown side by side on its sample photo, together with a slightly brighter and a slightly darker copy of its newest reference option. Each version is made the way the export makes it, at 1280 px: the same darktable development (about three seconds for each darktable edit among the options), the same steps, and the same light sharpen when the export sharpens. Pick one with a click or the keys 1 to 9; it applies to every photo of the group. If none fits, type the change you want. The app makes that version at once, on top of the version you had picked, and picks it. You can also skip a group.
+For each group, its options are shown side by side on the sharpest of its selected photos, together with a slightly brighter and a slightly darker copy of its newest reference option. Each version is made the way the export makes it, at 1280 px: the same darktable development (about three seconds for each darktable edit among the options), the same steps, and the same light sharpen when the export sharpens. "Recalculate" (F5) makes the versions again, for example after you changed a darktable edit in darktable; other groups get new versions when you open them. Pick one with a click or the keys 1 to 9; it applies to every photo of the group. If none fits, type the change you want. The app makes that version at once, on top of the version you had picked, and picks it. You can also skip a group.
 
 Brightness options change the whole photo with one curve and keep the colors, so faces are never lifted as a bright patch on a darker photo.
 
 ### 6. Export
 
-Every kept photo of the groups with a pick is developed, refined and written as a JPEG file: 1920 px on the long side and quality 100 by default, with the date, camera and exposure copied from the original. A file that already exists is never overwritten, and a stopped export leaves no half-written files.
+Every kept photo of the groups with a pick is developed, refined and written as a JPEG file: 1920 px on the long side and quality 100 by default, with the date, camera and exposure copied from the original. A file that already exists is kept and its photo skipped, unless you tick "Overwrite files that already exist in the folder"; then the old file is replaced in one step, and the results list says "Replaced". A stopped export leaves no half-written files.
 
 A raw file is developed by `darktable-cli` from its raw data, at full size and shrunk to the export size at the end, with the picked option's darktable edit, or else the photo's own sidecar, or darktable's default development when it has none. darktable hands the result over as a 16-bit PNG in a temporary folder. The app applies the option's own steps to it, sharpens it a little (radius 0.75 px at 75 %; this can be switched off), and compresses it once, into the JPEG, with an sRGB color profile. That takes about three seconds per photo. `darktable-cli` develops one photo at a time at low priority, so the computer stays usable.
 
@@ -145,7 +149,7 @@ Before this app, the workflow ran as Python scripts driven from Claude Code sess
 - Change brightness with one global adjustment per photo. A face lifted on its own looked like a bright spot on a darker photo and was rejected.
 - Bring faces to the brightness of faces in photos you kept, and no further. Early exports with brighter faces were sent back as too bright.
 - Leave colors to the references. For photos of people, the author rejected changes to warmth and tint and overlays such as vignettes, and asked only for exposure, base curve and tone equalizer changes. For landscapes, the same author chose warm grades with vignettes.
-- Never overwrite. Exports go only to free file names.
+- Never overwrite without being asked. Exports go to free file names; overwriting is a box you tick, and it is off by default.
 - Keep the machine usable. Three parallel full-size exports once froze the machine, so background work uses at most two threads, `darktable-cli` develops one photo at a time at low priority, and a stopped export picks up where it left off.
 - Work with darktable through files only. A remote query into a running darktable crashed it, and a Lua plugin kept it from starting until the plugin was switched off.
 

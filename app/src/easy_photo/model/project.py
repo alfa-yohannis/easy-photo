@@ -507,6 +507,82 @@ class Project:
         self._group_pipelines = dict(group_pipelines)
         self._unused_options = {group_id: set(option_ids) for group_id, option_ids in unused_options.items()}
 
+    def selected_photos_of(self, group: PhotoGroup) -> list[Photo]:
+        """The photos of a group that are selected (kept), so they are exported.
+
+        Args:
+            group: The group.
+
+        Returns:
+            The photos, in the group's order.
+        """
+        selected: list[Photo] = []
+        for photo_id in group.photo_ids:
+            photo = self._photos.get(photo_id)
+            decision = self.decision_of(photo_id)
+            if photo is not None and decision is not None and decision.is_kept:
+                selected.append(photo)
+        return selected
+
+    def sample_of(self, group: PhotoGroup) -> Photo | None:
+        """The photo that stands for a group in the Refine step: the sharpest of its selected photos.
+
+        When none of its photos is selected, the photo picked when the group
+        was made stands for it.
+
+        Args:
+            group: The group.
+
+        Returns:
+            The photo, or None when none of the group's photos is in the project.
+        """
+        selected = self.selected_photos_of(group)
+        if selected:
+            return self.sharpest_of(selected)
+        stored = self._photos.get(group.sample_id)
+        if stored is not None:
+            return stored
+        for photo_id in group.photo_ids:
+            photo = self._photos.get(photo_id)
+            if photo is not None:
+                return photo
+        return None
+
+    def sharpest_of(self, photos: Sequence[Photo]) -> Photo:
+        """The sharpest of some photos, by the sharpness the Filter step measured.
+
+        Args:
+            photos: The photos; at least one.
+
+        Returns:
+            The sharpest photo; the first when none was measured.
+        """
+        best = photos[0]
+        best_sharpness = -1.0
+        for photo in photos:
+            result = self._quality.get(photo.id)
+            if result is None:
+                continue
+            sharpness = result.scores.sharpness
+            if sharpness > best_sharpness:
+                best = photo
+                best_sharpness = sharpness
+        return best
+
+    def remove_group(self, group_id: str) -> None:
+        """Remove one group, with its pick, its own typed options and its turned-off options.
+
+        Its photos stay in the project, but no group holds them, so they are
+        not exported until the groups are made again.
+
+        Args:
+            group_id: Id of the group.
+        """
+        self._groups = [group for group in self._groups if group.id != group_id]
+        self._choices.pop(group_id, None)
+        self._group_pipelines.pop(group_id, None)
+        self._unused_options.pop(group_id, None)
+
     def replace_groups(self, groups: Sequence[PhotoGroup]) -> None:
         """Replace the group objects but keep the choices, for groups that only got a new title.
 

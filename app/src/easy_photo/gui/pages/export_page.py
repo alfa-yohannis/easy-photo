@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QPoint, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -13,16 +13,19 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
+    QMenu,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.file_locations import FileLocations
 from easy_photo.gui.pages.base_page import WorkflowPage
 from easy_photo.gui.style import AppStyle
 from easy_photo.gui.widgets.card import Card
-from easy_photo.services.exporter import ExportResult, ExportStatus
+from easy_photo.services.exporter import ExportResult
 from easy_photo.settings import ExportSettings
 from easy_photo.wording import count_text
 
@@ -43,7 +46,7 @@ class ExportPage(WorkflowPage):
             style,
             "Export",
             "Each kept photo is developed, refined with the option picked for its group, and written as a JPEG "
-            "file. A file that already exists is never overwritten.",
+            "file. A file that already exists is kept and skipped, unless you tick Overwrite.",
             parent,
         )
         self._written = 0
@@ -62,6 +65,11 @@ class ExportPage(WorkflowPage):
         buttons.addStretch(1)
         results_title = self.make_label("Results", "SectionTitle")
         self._results = QListWidget(content)
+        self._results.setToolTip("Double-click a photo to show it in its folder; right-click to open it.")
+        self._results.itemDoubleClicked.connect(self._show_result_in_folder)
+        self._results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._results.customContextMenuRequested.connect(self._show_result_menu)
+        self._locations = FileLocations()
         layout.addWidget(options)
         layout.addWidget(self._summary)
         layout.addLayout(buttons)
@@ -104,6 +112,7 @@ class ExportPage(WorkflowPage):
         self._quality.setValue(options.quality)
         self._copy_metadata.setChecked(options.copy_metadata)
         self._sharpen.setChecked(options.sharpen)
+        self._overwrite.setChecked(options.overwrite)
         self._refresh_development_note()
         self._refresh_summary()
 
@@ -129,6 +138,8 @@ class ExportPage(WorkflowPage):
         self._quality.setMaximumWidth(160)
         self._copy_metadata = QCheckBox("Copy the date, camera and exposure details from the original")
         self._sharpen = QCheckBox("Sharpen a little after shrinking")
+        self._overwrite = QCheckBox("Overwrite files that already exist in the folder")
+        self._overwrite.setToolTip("Without this, a photo whose file already exists is skipped.")
         self._development_note = self.make_label("", "Muted")
         self._development_note.setWordWrap(True)
         form = QFormLayout()
@@ -137,6 +148,7 @@ class ExportPage(WorkflowPage):
         form.addRow("JPEG quality", self._quality)
         form.addRow("", self._copy_metadata)
         form.addRow("", self._sharpen)
+        form.addRow("", self._overwrite)
         card.body.addLayout(form)
         card.body.addWidget(self._development_note)
         return card
@@ -167,7 +179,8 @@ class ExportPage(WorkflowPage):
         quality = self._quality.value()
         copy_metadata = self._copy_metadata.isChecked()
         sharpen = self._sharpen.isChecked()
-        return ExportSettings(cleaned, long_side, quality, copy_metadata, sharpen)
+        overwrite = self._overwrite.isChecked()
+        return ExportSettings(cleaned, long_side, quality, copy_metadata, sharpen, overwrite)
 
     def _refresh_summary(self) -> None:
         """Say how many photos an export would write, and which groups are left out."""
@@ -215,12 +228,47 @@ class ExportPage(WorkflowPage):
         self._results.clear()
         written = 0
         for result in results:
-            if result.status is ExportStatus.WRITTEN:
+            if result.status.is_written:
                 written += 1
             text = f"{result.status.value}:  {result.target.name}"
             if result.message:
                 text = f"{text}  ({result.message})"
-            self._results.addItem(text)
+            item = QListWidgetItem(text)
+            target_text = str(result.target)
+            item.setData(Qt.ItemDataRole.UserRole, target_text)
+            self._results.addItem(item)
         self._written = written
         self._refresh_summary()
         self.readiness_changed.emit()
+
+    def _show_result_in_folder(self, item: QListWidgetItem) -> None:
+        """Show an exported file in its folder in the file manager.
+
+        Args:
+            item: The file's line in the results.
+        """
+        target_text = item.data(Qt.ItemDataRole.UserRole)
+        target = Path(target_text)
+        self._locations.show_in_folder(target)
+
+    def _show_result_menu(self, position: QPoint) -> None:
+        """Offer to open the exported file under the mouse, or to show it in its folder.
+
+        Args:
+            position: Where the user right-clicked, in the list's own coordinates.
+        """
+        item = self._results.itemAt(position)
+        if item is None:
+            return
+        target_text = item.data(Qt.ItemDataRole.UserRole)
+        target = Path(target_text)
+        menu = QMenu(self)
+        open_action = menu.addAction("Open the file")
+        show_action = menu.addAction("Show in folder")
+        viewport = self._results.viewport()
+        screen_position = viewport.mapToGlobal(position)
+        chosen = menu.exec(screen_position)
+        if chosen is open_action:
+            self._locations.open_file(target)
+        elif chosen is show_action:
+            self._locations.show_in_folder(target)

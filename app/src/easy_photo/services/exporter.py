@@ -26,8 +26,16 @@ class ExportStatus(Enum):
     """What happened to one photo during the export."""
 
     WRITTEN = "Written"
+    REPLACED = "Replaced"
+    """Written over a file with the same name, because the user asked to overwrite."""
+
     SKIPPED = "Skipped, a file with this name exists"
     FAILED = "Failed"
+
+    @property
+    def is_written(self) -> bool:
+        """True when the photo was written, as a new file or over an old one."""
+        return self in (ExportStatus.WRITTEN, ExportStatus.REPLACED)
 
 
 @dataclass(frozen=True)
@@ -41,16 +49,16 @@ class ExportResult:
 
 
 class Exporter:
-    """Develops, refines and writes photos as JPEG files, and never overwrites a file.
+    """Develops, refines and writes photos as JPEG files; it overwrites a file only when asked.
 
     Raw files are developed at the export size from their raw data (see
     :class:`PhotoDeveloper`), so the JPEG is compressed only once, at the end.
     Shrinking softens fine detail a little; an optional light sharpen (see
     :class:`Sharpener`) brings it back.
 
-    Each file is written under a temporary name first and only gets its real
-    name when that name is still free, so a stopped export never leaves a
-    half-written photo behind.
+    Each file is written under a temporary name first and gets its real name
+    only when it is complete, so a stopped export never leaves a half-written
+    photo behind, and an overwritten file is replaced in one step.
     """
 
     EDIT_LEFT_OUT = "without the darktable edit, which is only applied to raw files"
@@ -96,14 +104,15 @@ class Exporter:
             photo: The photo.
             pipeline: The refinement chosen for its group.
             faces: The faces found in the photo.
-            settings: Folder, size, quality, sharpening and metadata options.
+            settings: Folder, size, quality, sharpening, metadata and overwrite options.
 
         Returns:
             What happened.
         """
         folder = Path(settings.output_folder)
         target = self.target_for(photo, folder)
-        if target.exists():
+        existed = target.exists()
+        if existed and not settings.overwrite:
             return ExportResult(photo.id, target, ExportStatus.SKIPPED)
         try:
             values = self._developer.develop(photo, pipeline, settings.long_side, True)
@@ -118,7 +127,8 @@ class Exporter:
         message = ""
         if pipeline.darktable_edit is not None and not self._developer.applies_edit(photo, pipeline):
             message = self.EDIT_LEFT_OUT
-        return ExportResult(photo.id, target, ExportStatus.WRITTEN, message)
+        status = ExportStatus.REPLACED if existed else ExportStatus.WRITTEN
+        return ExportResult(photo.id, target, status, message)
 
     def _exif_of(self, photo: Photo) -> bytes | None:
         """The camera details to copy into the exported file.
@@ -139,16 +149,16 @@ class Exporter:
         return self._reader.exif_bytes_of(image)
 
     def _write(self, pixels: np.ndarray, target: Path, settings: ExportSettings, exif_bytes: bytes | None) -> bool:
-        """Save pixels as a JPEG file under the target name, if that name is still free.
+        """Save pixels as a JPEG file under the target name, if that name is still free or may be overwritten.
 
         Args:
             pixels: RGB pixels, 8 bits per channel.
             target: The file to write.
-            settings: The JPEG quality and whether to sharpen.
+            settings: The JPEG quality, whether to sharpen, and whether to overwrite.
             exif_bytes: Camera details to store in the file, or None.
 
         Returns:
-            False when a file with the target name appeared in the meantime.
+            False when a file with the target name appeared in the meantime and may not be overwritten.
         """
         target.parent.mkdir(parents=True, exist_ok=True)
         unique = uuid.uuid4().hex
@@ -163,22 +173,27 @@ class Exporter:
         if exif_bytes:
             options["exif"] = exif_bytes
         image.save(temporary, "JPEG", **options)
-        return self._place(temporary, target)
+        return self._place(temporary, target, settings.overwrite)
 
-    def _place(self, temporary: Path, target: Path) -> bool:
-        """Give the finished file its real name, but only when that name is free.
+    def _place(self, temporary: Path, target: Path, overwrite: bool) -> bool:
+        """Give the finished file its real name; without overwriting, only when that name is free.
 
-        A hard link fails when the name exists, so no file can be overwritten,
-        even by a second export running at the same time. File systems without
-        hard links fall back to a check followed by a rename.
+        When overwriting, a rename replaces the old file in one step. Otherwise
+        a hard link is made, which fails when the name exists, so no file can
+        be overwritten, even by a second export running at the same time. File
+        systems without hard links fall back to a check followed by a rename.
 
         Args:
             temporary: The finished file under its temporary name.
             target: The real name.
+            overwrite: Replace a file that has the real name.
 
         Returns:
             True when the file got its real name.
         """
+        if overwrite:
+            os.replace(temporary, target)
+            return True
         try:
             os.link(temporary, target)
         except FileExistsError:

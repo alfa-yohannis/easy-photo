@@ -11,8 +11,9 @@ import pytest
 from PIL import ExifTags, Image
 
 from easy_photo.model.group import PhotoGroup
-from easy_photo.model.project import SavedName
-from easy_photo.model.quality import Decision
+from easy_photo.model.photo import FileKind, Photo
+from easy_photo.model.project import Project, SavedName
+from easy_photo.model.quality import Decision, QualityResult, QualityScores
 from easy_photo.refinement.pipeline import PipelineSource, RefinementPipeline
 from easy_photo.refinement.steps import ContrastStep, StepCatalog
 from easy_photo.services.darktable import DarktableRenderer
@@ -96,6 +97,52 @@ def test_manifest_keeps_the_users_work(tmp_path: Path) -> None:
     assert not opened.option_used_in("group-1", "words-2")
 
 
+def test_the_sharpest_selected_photo_stands_for_a_group(tmp_path: Path) -> None:
+    """The group's sample is the sharpest selected photo; with none selected, the photo picked at grouping."""
+    project = Project("Samples", tmp_path)
+    photos = [Photo(tmp_path / f"P100000{number}.RW2", FileKind.RAW) for number in range(3)]
+    project.set_photos(photos)
+    for photo, sharpness in zip(photos, [40.0, 90.0, 60.0]):
+        scores = QualityScores(sharpness, 0.2, 0.8, 0.0)
+        result = QualityResult(scores, ())
+        project.set_quality(photo.id, result)
+    photo_ids = [photo.id for photo in photos]
+    group = PhotoGroup("group-1", "Group 1", photo_ids, photo_ids[0])
+    sharpest = project.sample_of(group)
+    project.decide(photo_ids[1], Decision.SET_ASIDE)
+    sharpest_selected = project.sample_of(group)
+    project.decide(photo_ids[0], Decision.SET_ASIDE)
+    project.decide(photo_ids[2], Decision.SET_ASIDE)
+    none_selected = project.sample_of(group)
+    assert sharpest is photos[1]
+    assert sharpest_selected is photos[2]
+    assert none_selected is photos[0]
+
+
+def test_removing_a_group_takes_its_pick_and_own_options(tmp_path: Path) -> None:
+    """A removed group leaves no pick, typed option or turned-off option behind; the other group keeps its own."""
+    manifest = make_manifest()
+    project = manifest.create("Two groups", tmp_path)
+    first = PhotoGroup("group-1", "Group 1", ["photo-a"], "photo-a")
+    second = PhotoGroup("group-2", "Group 2", ["photo-b"], "photo-b")
+    project.set_groups([first, second])
+    contrast = ContrastStep(20)
+    typed = RefinementPipeline("typed-1", "more contrast", PipelineSource.WORDS, [contrast])
+    shared = RefinementPipeline("words-1", "Your words: more contrast", PipelineSource.WORDS, [contrast])
+    project.add_pipeline(shared)
+    project.add_group_pipeline("group-2", typed)
+    project.choose("group-1", "words-1")
+    project.choose("group-2", "typed-1")
+    project.set_option_used("group-2", "words-1", False)
+    project.remove_group("group-2")
+    group_ids = [group.id for group in project.groups]
+    assert group_ids == ["group-1"]
+    assert project.choice_of("group-2") is None
+    assert project.group_pipelines("group-2") == []
+    assert project.unused_options == {}
+    assert project.choice_of("group-1").pipeline_id == "words-1"
+
+
 def test_manifest_refuses_a_second_project_in_one_folder(tmp_path: Path) -> None:
     """Creating a project where one already exists fails."""
     manifest = make_manifest()
@@ -136,6 +183,30 @@ def test_export_shrinks_keeps_details_and_never_overwrites(tmp_path: Path, photo
     assert max(size) == 320
     assert exif.get(ExifTags.Base.DateTime) == "2024:12:14 10:00:00"
     leftovers = [path for path in output.glob("*.part")]
+    assert leftovers == []
+
+
+def test_export_overwrites_only_when_asked(tmp_path: Path, photo_maker: PhotoMaker) -> None:
+    """With overwrite on, an existing file is replaced in one step and the result says so."""
+    pixels = photo_maker.scene((0.9, 0.8, 0.7), 1)
+    source = photo_maker.write("P1000001", pixels, MORNING)
+    finder = PhotoFinder()
+    photos = finder.find([source])
+    exporter = make_exporter(tmp_path)
+    camera = RefinementPipeline.camera()
+    output = tmp_path / "export"
+    output_text = str(output)
+    first_settings = ExportSettings(output_text, 320, 95, True)
+    replace_settings = ExportSettings(output_text, 200, 95, True, True, True)
+    first = exporter.export(photos[0], camera, [], first_settings)
+    replaced = exporter.export(photos[0], camera, [], replace_settings)
+    with Image.open(replaced.target) as written:
+        size = written.size
+    leftovers = [path for path in output.glob(".*.part")]
+    assert first.status is ExportStatus.WRITTEN
+    assert replaced.status is ExportStatus.REPLACED
+    assert replaced.status.is_written
+    assert max(size) == 200
     assert leftovers == []
 
 

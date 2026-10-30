@@ -193,7 +193,10 @@ class GroupPage(WorkflowPage):
         return splitter
 
     def _make_groups_column(self, parent: QWidget) -> QWidget:
-        """The group list, with a button to rename the chosen group (also F2 or a double click).
+        """The group list, with buttons to rename the chosen group and to remove the selected groups.
+
+        A group is renamed with F2 or a double click too, and removed with the Delete key.
+        Ctrl and Shift select several groups to remove at once.
 
         Args:
             parent: The splitter.
@@ -210,17 +213,36 @@ class GroupPage(WorkflowPage):
         self._groups_list.setMinimumWidth(280)
         self._groups_list.setWordWrap(True)
         self._groups_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._groups_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._groups_list.currentItemChanged.connect(self._on_group_chosen)
         self._groups_list.itemDoubleClicked.connect(self._rename_chosen_group)
+        delete_key = QKeySequence(QKeySequence.StandardKey.Delete)
+        delete_shortcut = QShortcut(delete_key, self._groups_list)
+        delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_shortcut.activated.connect(self._remove_selected_groups)
         rename_button = self.make_button("Rename group…   (F2)", self._rename_chosen_group)
+        remove_button = self.make_button("Remove…", self._remove_selected_groups)
+        remove_button.setToolTip("Remove the selected groups. Their photos stay in the project but are not exported.")
+        buttons = QHBoxLayout()
+        buttons.addWidget(rename_button, 1)
+        buttons.addWidget(remove_button)
         layout.addWidget(self._groups_list, 1)
-        layout.addWidget(rename_button)
+        layout.addLayout(buttons)
         return column
 
     def _rename_chosen_group(self) -> None:
         """Ask for a new name of the chosen group."""
         group_id = self._chosen_group_id()
         self.ask_group_name(group_id)
+
+    def _remove_selected_groups(self) -> None:
+        """Ask to remove the selected groups, or the chosen group when none is selected."""
+        items = self._groups_list.selectedItems()
+        group_ids = [item.data(Qt.ItemDataRole.UserRole) for item in items]
+        if not group_ids:
+            chosen = self._chosen_group_id()
+            group_ids = [chosen] if chosen else []
+        self.ask_to_remove_groups(group_ids)
 
     def _make_photos_column(self, parent: QWidget) -> QWidget:
         """The photos of the chosen group, with buttons to select and unselect them.
@@ -361,8 +383,7 @@ class GroupPage(WorkflowPage):
             text = self._group_text(group.id)
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, group.id)
-            image = self._controller.thumbnail(group.sample_id)
-            icon = self._icon(image, self.GROUP_ICON)
+            icon = self._group_icon(group.id)
             item.setIcon(icon)
             self._groups_list.addItem(item)
         self._choose_row_of(chosen)
@@ -461,7 +482,7 @@ class GroupPage(WorkflowPage):
         self._selection_note.setText(f"{selection}. Unselected photos are not exported.")
 
     def _on_selection_changed(self) -> None:
-        """Update the group texts after photos were selected or unselected."""
+        """Update the group texts and pictures after photos were selected or unselected."""
         project = self._controller.project
         if project is None:
             return
@@ -473,7 +494,22 @@ class GroupPage(WorkflowPage):
                 continue
             text = self._group_text(group_id)
             item.setText(text)
+            icon = self._group_icon(group_id)
+            item.setIcon(icon)
         self._refresh_selection_note()
+
+    def _group_icon(self, group_id: str) -> QIcon:
+        """The picture of a group in the list: the sharpest of its selected photos, as in the Refine step.
+
+        Args:
+            group_id: Id of the group.
+
+        Returns:
+            The icon; empty while the photo's thumbnail is not read yet.
+        """
+        sample = self._controller.sample_photo(group_id)
+        image = self._controller.thumbnail(sample.id) if sample is not None else None
+        return self._icon(image, self.GROUP_ICON)
 
     def _select_chosen(self) -> None:
         """Select the chosen photos."""

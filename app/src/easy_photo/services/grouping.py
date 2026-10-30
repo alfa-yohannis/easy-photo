@@ -41,16 +41,8 @@ class Grouper(ABC):
         Returns:
             Id of the sharpest photo (the first photo when none was measured).
         """
-        best_id = photos[0].id
-        best_sharpness = -1.0
-        for photo in photos:
-            result = project.quality_of(photo.id)
-            if result is None:
-                continue
-            if result.scores.sharpness > best_sharpness:
-                best_id = photo.id
-                best_sharpness = result.scores.sharpness
-        return best_id
+        sharpest = project.sharpest_of(photos)
+        return sharpest.id
 
     def _time_range(self, photos: Sequence[Photo]) -> str:
         """Describe when the photos of a group were taken.

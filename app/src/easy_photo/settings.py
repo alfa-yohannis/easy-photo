@@ -82,6 +82,9 @@ class ExportSettings:
     sharpen: bool = True
     """Sharpen a little after shrinking, to bring back the fine detail that shrinking softens."""
 
+    overwrite: bool = False
+    """Write over files that already exist in the export folder; otherwise they are kept and skipped."""
+
 
 @dataclass
 class AppSettings:

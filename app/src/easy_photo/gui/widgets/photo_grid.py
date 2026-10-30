@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QModelIndex, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QAbstractItemView, QListView, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QWidget
+from pathlib import Path
 
+from PySide6.QtCore import QModelIndex, QPoint, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QListView,
+    QMenu,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QWidget,
+)
+
+from easy_photo.gui.file_locations import FileLocations
 from easy_photo.gui.photo_model import PhotoListModel
 from easy_photo.gui.style import AppStyle
 from easy_photo.model.quality import Decision
@@ -217,7 +228,11 @@ class PhotoTileDelegate(QStyledItemDelegate):
 
 
 class PhotoGrid(QListView):
-    """A grid of photo tiles. One or more tiles can be selected."""
+    """A grid of photo tiles. One or more tiles can be selected.
+
+    A right click on a tile offers to open the photo's file, or to show it in
+    its folder in the file manager.
+    """
 
     current_photo_changed = Signal(str)
     selection_changed = Signal()
@@ -246,6 +261,9 @@ class PhotoGrid(QListView):
         selection = self.selectionModel()
         selection.currentChanged.connect(self._on_current_changed)
         selection.selectionChanged.connect(self._on_selection_changed)
+        self._locations = FileLocations()
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_file_menu)
 
     def set_tile_width(self, width: int) -> None:
         """Change the size of the tiles.
@@ -345,3 +363,25 @@ class PhotoGrid(QListView):
             _deselected: Newly unselected items (not used).
         """
         self.selection_changed.emit()
+
+    def _show_file_menu(self, position: QPoint) -> None:
+        """Offer to open the photo under the mouse, or to show it in its folder.
+
+        Args:
+            position: Where the user right-clicked, in the grid's own coordinates.
+        """
+        index = self.indexAt(position)
+        if not index.isValid():
+            return
+        photo_id = index.data(PhotoListModel.PHOTO_ID_ROLE)
+        path = Path(photo_id)
+        menu = QMenu(self)
+        open_action = menu.addAction("Open the file")
+        show_action = menu.addAction("Show in folder")
+        viewport = self.viewport()
+        screen_position = viewport.mapToGlobal(position)
+        chosen = menu.exec(screen_position)
+        if chosen is open_action:
+            self._locations.open_file(path)
+        elif chosen is show_action:
+            self._locations.show_in_folder(path)

@@ -82,6 +82,9 @@ class VersionPreview:
     description: str
     image: QImage
 
+    sample_id: str
+    """Id of the photo the version was made on."""
+
 
 @dataclass(frozen=True)
 class ExportPlan:
@@ -169,6 +172,8 @@ class ProjectController(QObject):
         self._face_images: dict[str, QImage] = {}
         self._versions: dict[str, list[VersionPreview]] = {}
         self._rendering: set[str] = set()
+        self._outdated_renders: set[str] = set()
+        """Groups whose versions are being made but were asked for again; the result is not kept."""
         self._reserved_ids: set[str] = set()
         self._scan_number = 0
         self._scan_task: BackgroundTask | None = None
@@ -497,6 +502,38 @@ class ProjectController(QObject):
         self.groups_changed.emit()
         self._changed()
 
+    def remove_groups(self, group_ids: Sequence[str]) -> None:
+        """Remove groups. Their photos stay in the project but are not exported.
+
+        A removed group's pick and typed options go with it, and so do the
+        references made for the removed groups only. Making the groups again
+        brings the photos back into groups.
+
+        Args:
+            group_ids: Ids of the groups.
+        """
+        project = self._project
+        if project is None:
+            return
+        removed = [group_id for group_id in group_ids if project.group(group_id) is not None]
+        if not removed:
+            return
+        own_options = self._options_only_for(removed)
+        for group_id in removed:
+            project.remove_group(group_id)
+            self._versions.pop(group_id, None)
+        for option_id in own_options:
+            project.remove_pipeline(option_id)
+        details = {"groups": removed, "options": own_options}
+        self._services.history_log.record("remove groups", details)
+        self.groups_changed.emit()
+        self.pipelines_changed.emit()
+        self.choices_changed.emit()
+        self._changed()
+        count = len(removed)
+        groups_text = count_text(count, "group")
+        self.notice.emit(f"Removed {groups_text}. Their photos are not exported until you make groups again.")
+
     def rename_group(self, group_id: str, title: str) -> None:
         """Give a group a name of the user's own. Its picks and references stay.
 
@@ -741,10 +778,29 @@ class ProjectController(QObject):
             group_id: Id of the group.
 
         Returns:
-            The versions; empty when they have not been made yet.
+            The versions; empty when they have not been made yet, or were made
+            on a photo that no longer stands for the group, because the
+            selection of its photos changed.
         """
         versions = self._versions.get(group_id, [])
+        if not self._made_on_sample(group_id, versions):
+            return []
         return list(versions)
+
+    def sample_photo(self, group_id: str) -> Photo | None:
+        """The photo the versions of a group are made on: the sharpest of its selected photos.
+
+        Args:
+            group_id: Id of the group.
+
+        Returns:
+            The photo, or None when the group is unknown or has no photos left.
+        """
+        project = self._project
+        group = project.group(group_id) if project is not None else None
+        if group is None:
+            return None
+        return project.sample_of(group)
 
     def render_versions(self, group_id: str) -> None:
         """Make every option's version of a group's sample photo, in the background.
@@ -758,7 +814,7 @@ class ProjectController(QObject):
         group = project.group(group_id)
         if group is None:
             return
-        sample = self._sample_photo(group.sample_id, group.photo_ids)
+        sample = project.sample_of(group)
         if sample is None:
             return
         options = self.options_for(group_id)
@@ -768,6 +824,22 @@ class ProjectController(QObject):
         job = partial(self._versions_job, group_id, sample, options, faces, sharpen)
         failed = partial(self._on_versions_failed, group_id)
         self._tasks.start("Making the versions to compare", job, self._on_versions_ready, failed)
+
+    def recalculate_versions(self, group_id: str) -> None:
+        """Forget every version made so far and make the versions of one group again.
+
+        Useful after a darktable edit changed in darktable: the options point at
+        its file, so new versions show the new edit. The other groups' versions
+        are made again when they are shown next.
+
+        Args:
+            group_id: Id of the group shown now.
+        """
+        self._versions.clear()
+        if group_id in self._rendering:
+            self._outdated_renders.add(group_id)
+            return
+        self.render_versions(group_id)
 
     def try_words(self, group_id: str, base_id: str | None, text: str) -> None:
         """Make a new option for one group from typed words, on top of another option.
@@ -898,7 +970,12 @@ class ProjectController(QObject):
         default_folder = str(project.default_export_folder)
         folder_text = settings.output_folder or default_folder
         run_settings = ExportSettings(
-            folder_text, settings.long_side, settings.quality, settings.copy_metadata, settings.sharpen
+            folder_text,
+            settings.long_side,
+            settings.quality,
+            settings.copy_metadata,
+            settings.sharpen,
+            settings.overwrite,
         )
         faces = {photo.id: project.faces_of(photo.id) for photo, _pipeline in plan.items}
         job = partial(self._export_job, plan.items, faces, run_settings)
@@ -1265,6 +1342,32 @@ class ProjectController(QObject):
             return
         self.notice.emit(f"Added the option {pipeline.name} for {group.title}.")
 
+    def _options_only_for(self, group_ids: Sequence[str]) -> list[str]:
+        """The options that some of these groups use and no other group does.
+
+        When no other group is left, an option meant for every group cannot be
+        told from one meant for these groups, so none is returned.
+
+        Args:
+            group_ids: Ids of the groups.
+
+        Returns:
+            The option ids.
+        """
+        project = self._project
+        others = [group.id for group in project.groups if group.id not in group_ids]
+        if not others:
+            return []
+        option_ids: list[str] = []
+        for option in project.pipelines:
+            if option.is_camera:
+                continue
+            used_by_others = [group_id for group_id in others if project.option_used_in(group_id, option.id)]
+            used_by_these = [group_id for group_id in group_ids if project.option_used_in(group_id, option.id)]
+            if used_by_these and not used_by_others:
+                option_ids.append(option.id)
+        return option_ids
+
     def _use_only_for(self, group_id: str, pipeline_id: str) -> None:
         """Turn an option off for every group but one.
 
@@ -1555,25 +1658,21 @@ class ProjectController(QObject):
 
     # ------------------------------------------------------ private: versions
 
-    def _sample_photo(self, sample_id: str, photo_ids: Sequence[str]) -> Photo | None:
-        """The photo that stands for a group, or the first photo of the group that still exists.
+    def _made_on_sample(self, group_id: str, previews: Sequence[VersionPreview]) -> bool:
+        """Tell whether versions were made on the photo that stands for the group now.
 
         Args:
-            sample_id: Id of the group's sample photo.
-            photo_ids: Ids of all photos of the group.
+            group_id: Id of the group.
+            previews: The versions.
 
         Returns:
-            The photo, or None when none of them is in the project.
+            True when every version shows the group's current sample photo.
         """
-        project = self._project
-        sample = project.photo(sample_id)
-        if sample is not None:
-            return sample
-        for photo_id in photo_ids:
-            photo = project.photo(photo_id)
-            if photo is not None:
-                return photo
-        return None
+        sample = self.sample_photo(group_id)
+        if sample is None:
+            return False
+        others = [preview for preview in previews if preview.sample_id != sample.id]
+        return not others
 
     def _versions_job(
         self,
@@ -1603,7 +1702,7 @@ class ProjectController(QObject):
         for done, option in enumerate(options):
             context.report_item(done, total, option.name)
             pixels = self._developed_sample(sample, option, developed)
-            preview = self._make_preview(pixels, option, faces, sharpen)
+            preview = self._make_preview(pixels, option, faces, sharpen, sample.id)
             previews.append(preview)
         context.report(total, total)
         return group_id, previews
@@ -1643,6 +1742,7 @@ class ProjectController(QObject):
         option: RefinementPipeline,
         faces: Sequence[Face],
         sharpen: bool,
+        sample_id: str,
     ) -> VersionPreview:
         """Apply one option to the sample photo's pixels.
 
@@ -1651,6 +1751,7 @@ class ProjectController(QObject):
             option: The option.
             faces: The faces of the sample photo.
             sharpen: Sharpen a little after shrinking, as the export does.
+            sample_id: Id of the sample photo.
 
         Returns:
             The version, ready to show.
@@ -1660,20 +1761,27 @@ class ProjectController(QObject):
             refined = self._sharpener.sharpen(refined)
         image = self._converter.to_qimage(refined)
         description = option.describe_steps()
-        return VersionPreview(option.id, option.name, description, image)
+        return VersionPreview(option.id, option.name, description, image, sample_id)
 
     def _on_versions_ready(self, result: tuple[str, list[VersionPreview]]) -> None:
-        """Keep the versions of a group, unless the options changed while they were being made.
+        """Keep the versions of a group, unless something changed while they were being made.
+
+        They are made again when the options changed, when a recalculation was
+        asked for, or when another photo now stands for the group.
 
         Args:
             result: The group id and the versions.
         """
         group_id, previews = result
         self._rendering.discard(group_id)
+        if group_id in self._outdated_renders:
+            self._outdated_renders.discard(group_id)
+            self.render_versions(group_id)
+            return
         made_ids = [preview.pipeline_id for preview in previews]
         options = self.options_for(group_id)
         wanted_ids = [option.id for option in options]
-        if made_ids != wanted_ids:
+        if made_ids != wanted_ids or not self._made_on_sample(group_id, previews):
             self.render_versions(group_id)
             return
         self._versions[group_id] = previews
@@ -1687,6 +1795,7 @@ class ProjectController(QObject):
             message: The error message.
         """
         self._rendering.discard(group_id)
+        self._outdated_renders.discard(group_id)
         self.problem.emit(message)
 
     def _render_one(self, group_id: str, option: RefinementPipeline) -> None:
@@ -1700,7 +1809,7 @@ class ProjectController(QObject):
         group = project.group(group_id)
         if group is None:
             return
-        sample = self._sample_photo(group.sample_id, group.photo_ids)
+        sample = project.sample_of(group)
         if sample is None:
             return
         faces = project.faces_of(sample.id)
@@ -1718,6 +1827,10 @@ class ProjectController(QObject):
         group_id, previews = result
         existing = self._versions.get(group_id)
         if existing is None:
+            self.render_versions(group_id)
+            return
+        combined = [*existing, *previews]
+        if not self._made_on_sample(group_id, combined):
             self.render_versions(group_id)
             return
         existing.extend(previews)
@@ -1763,18 +1876,22 @@ class ProjectController(QObject):
             results: What happened to each photo.
         """
         written = 0
+        replaced = 0
         skipped = 0
         failed = 0
         for result in results:
-            if result.status is ExportStatus.WRITTEN:
+            if result.status.is_written:
                 written += 1
             elif result.status is ExportStatus.SKIPPED:
                 skipped += 1
             else:
                 failed += 1
-        details = {"written": written, "skipped": skipped, "failed": failed}
+            if result.status is ExportStatus.REPLACED:
+                replaced += 1
+        details = {"written": written, "replaced": replaced, "skipped": skipped, "failed": failed}
         self._services.history_log.record("export", details)
-        self.notice.emit(f"Export done: {written} written, {skipped} skipped, {failed} failed.")
+        written_text = f"{written} written ({replaced} over old files)" if replaced else f"{written} written"
+        self.notice.emit(f"Export done: {written_text}, {skipped} skipped, {failed} failed.")
         self.export_finished.emit(results)
 
     # ------------------------------------------------------- private: preview

@@ -8,6 +8,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from easy_photo.gui.file_locations import FileLocations
 from easy_photo.gui.style import AppStyle
 from easy_photo.gui.widgets.image_view import ImageView
 from easy_photo.model.photo import Photo
@@ -69,8 +70,20 @@ class PhotoInspector(QFrame):
         buttons = QHBoxLayout()
         buttons.addWidget(keep_button)
         buttons.addWidget(aside_button)
+        self._photo: Photo | None = None
+        self._locations = FileLocations()
+        self._open_button = QPushButton("Open the file")
+        self._open_button.clicked.connect(self._open_file)
+        self._show_button = QPushButton("Show in folder")
+        self._show_button.clicked.connect(self._show_in_folder)
+        file_buttons = QHBoxLayout()
+        file_buttons.addWidget(self._open_button)
+        file_buttons.addWidget(self._show_button)
+        file_buttons.addStretch(1)
+        self._set_file_buttons_enabled(False)
         layout.addWidget(self._view, 1)
         layout.addWidget(self._name)
+        layout.addLayout(file_buttons)
         layout.addWidget(self._details)
         layout.addWidget(self._checks)
         layout.addWidget(self._decision)
@@ -86,6 +99,8 @@ class PhotoInspector(QFrame):
             decision: The decision that counts.
             by_user: True when the decision is the user's own.
         """
+        self._photo = photo
+        self._set_file_buttons_enabled(photo is not None)
         if photo is None:
             self._name.setText("")
             self._details.setText("")
@@ -108,6 +123,25 @@ class PhotoInspector(QFrame):
             image: The picture, or None.
         """
         self._view.set_image(image)
+
+    def _set_file_buttons_enabled(self, enabled: bool) -> None:
+        """Switch the "Open the file" and "Show in folder" buttons on or off.
+
+        Args:
+            enabled: True while a photo is shown.
+        """
+        self._open_button.setEnabled(enabled)
+        self._show_button.setEnabled(enabled)
+
+    def _open_file(self) -> None:
+        """Open the shown photo's file with the program the system uses for it."""
+        if self._photo is not None:
+            self._locations.open_file(self._photo.path)
+
+    def _show_in_folder(self) -> None:
+        """Show the shown photo in its folder in the file manager."""
+        if self._photo is not None:
+            self._locations.show_in_folder(self._photo.path)
 
     def _details_text(self, photo: Photo) -> str:
         """The camera details line.

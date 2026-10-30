@@ -127,12 +127,14 @@ class ReferencesPage(WorkflowPage):
         self._target.setMinimumWidth(320)
         self._target.currentIndexChanged.connect(self._on_target_changed)
         self._rename_button = self.make_button("Rename group…", self._rename_target)
+        self._remove_group_button = self.make_button("Remove group…", self._remove_target)
         self._target_note = self.make_label("", "Muted")
         self._target_note.setWordWrap(True)
         row = QHBoxLayout()
         row.addWidget(label)
         row.addWidget(self._target)
         row.addWidget(self._rename_button)
+        row.addWidget(self._remove_group_button)
         row.addWidget(self._target_note, 1)
         return row
 
@@ -141,6 +143,12 @@ class ReferencesPage(WorkflowPage):
         group_id = self._target_group_id()
         if group_id is not None:
             self.ask_group_name(group_id)
+
+    def _remove_target(self) -> None:
+        """Ask to remove the group chosen in "References for"."""
+        group_id = self._target_group_id()
+        if group_id is not None:
+            self.ask_to_remove_groups([group_id])
 
     def _make_history_card(self) -> Card:
         """The card for photos the user picked before.
@@ -290,11 +298,12 @@ class ReferencesPage(WorkflowPage):
         self._refresh_options()
 
     def _refresh_target_note(self) -> None:
-        """Say who new references are for; only a single group can be renamed."""
+        """Say who new references are for; only a single group can be renamed or removed."""
         project = self._controller.project
         has_groups = project is not None and bool(project.groups)
         group_chosen = self._target_group_id() is not None
         self._rename_button.setEnabled(group_chosen)
+        self._remove_group_button.setEnabled(group_chosen)
         if not has_groups:
             text = "Make groups first. Until then every reference is for every group."
         elif self._target_group_id() is None:

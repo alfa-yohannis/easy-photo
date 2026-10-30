@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QInputDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from easy_photo.gui.controller import ProjectController
 from easy_photo.gui.style import AppStyle
@@ -130,3 +130,32 @@ class WorkflowPage(QWidget):
         )
         if accepted:
             self._controller.rename_group(group_id, name)
+
+    def ask_to_remove_groups(self, group_ids: Sequence[str]) -> None:
+        """Ask the user to confirm, then remove groups.
+
+        Args:
+            group_ids: Ids of the groups; unknown ids are left out.
+        """
+        project = self._controller.project
+        if project is None:
+            return
+        groups = [project.group(group_id) for group_id in group_ids]
+        known = [group for group in groups if group is not None]
+        if not known:
+            return
+        count = len(known)
+        if count == 1:
+            question = f'Remove the group "{known[0].title}"?'
+        else:
+            question = f"Remove these {count} groups?"
+        text = (
+            f"{question}\n\nTheir photos stay in the project but are not exported. Their picks, and the "
+            "references made only for them, are removed too. Make groups again to bring the photos back."
+        )
+        buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        answer = QMessageBox.question(self, "Remove groups", text, buttons, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        known_ids = [group.id for group in known]
+        self._controller.remove_groups(known_ids)
