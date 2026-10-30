@@ -497,6 +497,34 @@ class ProjectController(QObject):
         self.groups_changed.emit()
         self._changed()
 
+    def rename_group(self, group_id: str, title: str) -> None:
+        """Give a group a name of the user's own. Its picks and references stay.
+
+        The name stays when people are renamed later; it is lost only when
+        the groups are made again.
+
+        Args:
+            group_id: Id of the group.
+            title: The new name.
+        """
+        project = self._project
+        if project is None:
+            return
+        cleaned = title.strip()
+        group = project.group(group_id)
+        if group is None or not cleaned or cleaned == group.title:
+            return
+        groups = []
+        for current in project.groups:
+            if current.id == group_id:
+                current = current.renamed_to(cleaned)
+            groups.append(current)
+        project.replace_groups(groups)
+        details = {"group": group_id, "title": cleaned}
+        self._services.history_log.record("rename group", details)
+        self.groups_changed.emit()
+        self._changed()
+
     def merge_people(self, person_ids: Sequence[str]) -> None:
         """Treat several people as one, when the face finder split one person in two.
 
@@ -979,13 +1007,14 @@ class ProjectController(QObject):
         found = FoundPhotos(scan_number, photos)
         context.send(found)
         total = len(photos)
-        for done, photo in enumerate(photos, start=1):
+        for done, photo in enumerate(photos):
             if context.stop_requested:
                 break
+            context.report_item(done, total, photo.name)
             if photo.id not in measured:
                 item = self._scan_one(scan_number, photo)
                 context.send(item)
-            context.report(done, total)
+        context.report(total, total)
         return scan_number
 
     def _scan_one(self, scan_number: int, photo: Photo) -> ScannedPhoto | UnreadablePhoto:
@@ -1082,9 +1111,10 @@ class ProjectController(QObject):
         """
         found: dict[str, list[Face]] = {}
         total = len(photos)
-        for done, photo in enumerate(photos, start=1):
+        for done, photo in enumerate(photos):
             if context.stop_requested:
                 break
+            context.report_item(done, total, photo.name)
             try:
                 pixels = self._services.reader.load_pixels(photo, self.FACE_SIDE)
             except PhotoReadError:
@@ -1092,7 +1122,7 @@ class ProjectController(QObject):
                 continue
             faces = self._services.face_finder.find(photo.id, pixels)
             found[photo.id] = faces
-            context.report(done, total)
+        context.report(total, total)
         return found
 
     def _on_faces_found(self, then_group: bool, found: dict[str, list[Face]]) -> None:
@@ -1141,12 +1171,12 @@ class ProjectController(QObject):
         self.faces_changed.emit()
 
     def _retitle_people_groups(self) -> None:
-        """Give the groups made by people the current names, keeping the user's picks."""
+        """Give the groups made by people the current names, keeping the user's picks and own group names."""
         project = self._project
         grouper = FaceGrouper()
         groups = []
         for group in project.groups:
-            if group.person_ids:
+            if group.person_ids and not group.renamed:
                 title = grouper.title_for(group.person_ids, project)
                 group = group.with_title(title)
             groups.append(group)
@@ -1207,7 +1237,7 @@ class ProjectController(QObject):
         Returns:
             The new option.
         """
-        return builder.build(pipeline_id, context.report)
+        return builder.build(pipeline_id, context.report_item)
 
     def _on_pipeline_built(self, group_id: str | None, pipeline: RefinementPipeline) -> None:
         """Add a new option to the project, for one group or for every group.
@@ -1570,11 +1600,12 @@ class ProjectController(QObject):
         developed: dict[str, np.ndarray] = {}
         previews: list[VersionPreview] = []
         total = len(options)
-        for done, option in enumerate(options, start=1):
+        for done, option in enumerate(options):
+            context.report_item(done, total, option.name)
             pixels = self._developed_sample(sample, option, developed)
             preview = self._make_preview(pixels, option, faces, sharpen)
             previews.append(preview)
-            context.report(done, total)
+        context.report(total, total)
         return group_id, previews
 
     def _developed_sample(
@@ -1714,13 +1745,15 @@ class ProjectController(QObject):
         """
         results: list[ExportResult] = []
         total = len(items)
-        for done, (photo, pipeline) in enumerate(items, start=1):
+        for done, (photo, pipeline) in enumerate(items):
             if context.stop_requested:
                 break
+            context.report_item(done, total, photo.name)
             photo_faces = faces.get(photo.id, [])
             result = self._services.exporter.export(photo, pipeline, photo_faces, settings)
             results.append(result)
-            context.report(done, total)
+        finished = len(results)
+        context.report(finished, total)
         return results
 
     def _on_export_finished(self, results: list[ExportResult]) -> None:

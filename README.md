@@ -54,6 +54,8 @@ Measurements are not stored in the manifest. They are made again when a project 
 1 Source -> 2 Filter -> 3 Group -> 4 References -> 5 Refine -> 6 Export
 ```
 
+While a step works through files, the progress bar in the status bar names the file it is on and how far it is, such as `P1188489.RW2  3 / 6`; the Stop button ends the job after the current file.
+
 ### 1. Source
 
 Drop folders or photos on the window, or browse for them. While you filter and group, raw files (RW2, CR3, NEF, ARW, DNG and others) are shown from the JPEG picture the camera stored inside each one, read with [rawpy](https://github.com/letmaik/rawpy) (LibRaw). That takes about 70 to 100 ms per photo, measuring included. The Refine previews and the export develop the raw data itself with darktable (see Export).
@@ -76,6 +78,8 @@ Photos are grouped one of two ways:
 - Same people: the app finds faces with YuNet, describes them with SFace, and sorts them into people. Photos with the same people form a group. You can rename people and merge two that are the same person.
 
 The sharpest photo of each group stands for it in the next steps. Within a group you can select and unselect photos one by one (K and X) or all at once; unselected photos stay in the group but are not exported.
+
+Rename a group with "Rename group…" under the group list, F2 or a double click; the References step has the same button next to "References for". A name you give stays when people are renamed, and its picks and references stay with it. Making the groups again starts over with new groups and names.
 
 ### 4. References
 

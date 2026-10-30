@@ -215,7 +215,7 @@ class ProjectManifest:
             group: The group.
 
         Returns:
-            Its id, title, details, photos and sample photo.
+            Its id, title, details, photos and sample photo, and whether the user named it.
         """
         return {
             "id": group.id,
@@ -224,6 +224,7 @@ class ProjectManifest:
             "photos": list(group.photo_ids),
             "sample": group.sample_id,
             "people": list(group.person_ids),
+            "renamed": group.renamed,
         }
 
     def _group_from_data(self, data: dict) -> PhotoGroup:
@@ -237,7 +238,8 @@ class ProjectManifest:
         """
         details = data.get("details", "")
         person_ids = data.get("people", [])
-        return PhotoGroup(data["id"], data["title"], data["photos"], data["sample"], details, person_ids)
+        renamed = data.get("renamed", False)
+        return PhotoGroup(data["id"], data["title"], data["photos"], data["sample"], details, person_ids, renamed)
 
     def _saved_name_from(self, data: dict) -> SavedName:
         """Read a person's saved name and face ids.

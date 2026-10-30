@@ -28,8 +28,8 @@ from easy_photo.services.photo_reader import PhotoReader, PhotoReadError
 from easy_photo.services.web_search import WebSearch, WebSearchError
 from easy_photo.wording import count_text
 
-ProgressReport = Callable[[int, int], None]
-"""Called with (items done, items in total) while a builder works."""
+ProgressReport = Callable[[int, int, str], None]
+"""Called with (items done, items in total, the item started now, such as a file name) while a builder works."""
 
 
 class PipelineError(Exception):
@@ -133,14 +133,14 @@ class ReferenceMeasurer:
         """
         samples = BrightnessSamples()
         total = len(photos)
-        for done, photo in enumerate(photos, start=1):
+        for done, photo in enumerate(photos):
+            if report is not None:
+                report(done, total, photo.name)
             try:
                 pixels = self._reader.load_pixels(photo, self.MEASURE_SIDE)
             except PhotoReadError:
                 continue
             self._add_sample(samples, photo.id, pixels)
-            if report is not None:
-                report(done, total)
         return samples.targets()
 
     def measure_pixels(self, pictures: Sequence[np.ndarray]) -> BrightnessTargets:
@@ -306,14 +306,14 @@ class ExamplePipelineBuilder(PipelineBuilder):
         pictures: list[np.ndarray] = []
         developed = 0
         total = len(photos)
-        for done, photo in enumerate(photos, start=1):
+        for done, photo in enumerate(photos):
+            if report is not None:
+                report(done, total, photo.name)
             pixels, was_developed = self._picture_of(photo)
             if pixels is not None:
                 pictures.append(pixels)
             if was_developed:
                 developed += 1
-            if report is not None:
-                report(done, total)
         if not pictures:
             raise PipelineError("None of the example files could be read.")
         targets = self._measurer.measure_pixels(pictures)
@@ -396,7 +396,7 @@ class DarktableEditPipelineBuilder(PipelineBuilder):
             message = str(error)
             raise PipelineError(message) from error
         if report is not None:
-            report(1, 1)
+            report(0, 1, self._edit_file.name)
         modules = edit.describe()
         details = f"darktable-cli applies {self._edit_file}: {modules}"
         left_out = edit.describe_left_out()
@@ -453,12 +453,12 @@ class InternetPipelineBuilder(PipelineBuilder):
             raise PipelineError(f'Nothing was found for "{self._query}".')
         pictures: list[np.ndarray] = []
         total = len(found)
-        for done, image in enumerate(found, start=1):
+        for done, image in enumerate(found):
+            if report is not None:
+                report(done, total, image.title)
             pixels = self._download(image)
             if pixels is not None:
                 pictures.append(pixels)
-            if report is not None:
-                report(done, total)
         if not pictures:
             raise PipelineError("None of the photos found could be downloaded.")
         targets = self._measurer.measure_pixels(pictures)

@@ -145,6 +145,15 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     assert ready
     words_option = options[1]
     controller.choose(first_group.id, words_option.id)
+    controller.rename_group(first_group.id, "  Sunrise  ")
+    renamed_group = project.group(first_group.id)
+    assert renamed_group.title == "Sunrise"
+    assert renamed_group.renamed
+    assert project.choice_of(first_group.id).pipeline_id == words_option.id
+    window._on_progress(2, 6, "P1188489.RW2")
+    assert window._progress.format() == "P1188489.RW2  3 / 6"
+    window._on_progress(0, 2, "100% crop.jpg")
+    assert window._progress.format() == "100%% crop.jpg  1 / 2"
     controller.try_words(second_group.id, None, "slightly darker")
     assert answers[3] == (second_group.id, True, "")
     assert project.choice_of(second_group.id).pipeline_id.startswith("typed-")
@@ -181,6 +190,7 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     assert reopened.sources == (photos_folder,)
     assert group_ids == [first_group.id, second_group.id]
     assert reopened.choice_of(second_group.id).pipeline_id.startswith("typed-")
+    assert reopened.groups[0].title == "Sunrise"
     assert not reopened.option_used_in(first_group.id, words_option.id)
     wait_until(lambda: not controller.tasks.is_busy)
     controller.close_project()

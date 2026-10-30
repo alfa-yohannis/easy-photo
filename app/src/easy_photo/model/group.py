@@ -20,6 +20,7 @@ class PhotoGroup:
         sample_id: str,
         details: str = "",
         person_ids: Sequence[str] = (),
+        renamed: bool = False,
     ) -> None:
         """Create a group.
 
@@ -30,6 +31,7 @@ class PhotoGroup:
             sample_id: Id of the photo shown when versions are compared.
             details: Extra line for the window, such as the time range.
             person_ids: For a group made by people, the ids of the people it shows.
+            renamed: True when the title is a name the user gave the group.
         """
         self._id = group_id
         self._title = title
@@ -37,11 +39,17 @@ class PhotoGroup:
         self._sample_id = sample_id
         self._details = details
         self._person_ids = tuple(person_ids)
+        self._renamed = renamed
 
     @property
     def person_ids(self) -> tuple[str, ...]:
         """For a group made by people, the ids of the people it shows; empty otherwise."""
         return self._person_ids
+
+    @property
+    def renamed(self) -> bool:
+        """True when the title is a name the user gave the group; the app then never changes it."""
+        return self._renamed
 
     def with_title(self, title: str) -> PhotoGroup:
         """A copy of this group with another title, for example after a person was renamed.
@@ -52,7 +60,20 @@ class PhotoGroup:
         Returns:
             The new group; this group does not change.
         """
-        return PhotoGroup(self._id, title, self._photo_ids, self._sample_id, self._details, self._person_ids)
+        return PhotoGroup(
+            self._id, title, self._photo_ids, self._sample_id, self._details, self._person_ids, self._renamed
+        )
+
+    def renamed_to(self, title: str) -> PhotoGroup:
+        """A copy of this group with a name the user gave it.
+
+        Args:
+            title: The user's name for the group.
+
+        Returns:
+            The new group; this group does not change.
+        """
+        return PhotoGroup(self._id, title, self._photo_ids, self._sample_id, self._details, self._person_ids, True)
 
     @property
     def id(self) -> str:

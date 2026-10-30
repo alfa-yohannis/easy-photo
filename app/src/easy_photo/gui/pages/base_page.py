@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QInputDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from easy_photo.gui.controller import ProjectController
 from easy_photo.gui.style import AppStyle
@@ -114,3 +114,19 @@ class WorkflowPage(QWidget):
         if object_name:
             label.setObjectName(object_name)
         return label
+
+    def ask_group_name(self, group_id: str) -> None:
+        """Ask the user for a new name of a group, and rename the group.
+
+        Args:
+            group_id: Id of the group; nothing happens when it is empty or unknown.
+        """
+        project = self._controller.project
+        group = project.group(group_id) if project is not None and group_id else None
+        if group is None:
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Rename group", "New name of the group:", QLineEdit.EchoMode.Normal, group.title
+        )
+        if accepted:
+            self._controller.rename_group(group_id, name)

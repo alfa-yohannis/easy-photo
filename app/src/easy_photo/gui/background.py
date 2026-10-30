@@ -20,7 +20,9 @@ class TaskSignals(QObject):
     can therefore safely update the project and the widgets.
     """
 
-    progress = Signal(int, int)
+    progress = Signal(int, int, str)
+    """(items done, items in total, the item being worked on now or an empty text)."""
+
     partial = Signal(object)
     finished = Signal(object)
     failed = Signal(str)
@@ -54,7 +56,17 @@ class TaskContext:
             done: Items done.
             total: Items in total.
         """
-        self._signals.progress.emit(done, total)
+        self._signals.progress.emit(done, total, "")
+
+    def report_item(self, done: int, total: int, item: str) -> None:
+        """Tell the window which item the job starts on, such as a file name.
+
+        Args:
+            done: Items finished so far; the item is number ``done + 1``.
+            total: Items in total.
+            item: The item, as the window shows it.
+        """
+        self._signals.progress.emit(done, total, item)
 
     def send(self, item: object) -> None:
         """Hand a partial result to the window, for example one measured photo.
@@ -123,7 +135,8 @@ class TaskRunner(QObject):
 
     busy_changed = Signal(bool)
     status_changed = Signal(str)
-    progress_changed = Signal(int, int)
+    progress_changed = Signal(int, int, str)
+    """(items done, items in total, the item being worked on now or an empty text)."""
 
     def __init__(self, max_threads: int = 2, parent: QObject | None = None) -> None:
         """Create the runner.

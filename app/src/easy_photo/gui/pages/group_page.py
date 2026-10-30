@@ -183,19 +183,44 @@ class GroupPage(WorkflowPage):
             The splitter that holds the three parts.
         """
         splitter = QSplitter(Qt.Orientation.Horizontal, parent)
-        self._groups_list = QListWidget(splitter)
+        groups_column = self._make_groups_column(splitter)
+        photos_column = self._make_photos_column(splitter)
+        self._people_panel = self._make_people_panel(splitter)
+        splitter.addWidget(groups_column)
+        splitter.addWidget(photos_column)
+        splitter.addWidget(self._people_panel)
+        splitter.setStretchFactor(1, 1)
+        return splitter
+
+    def _make_groups_column(self, parent: QWidget) -> QWidget:
+        """The group list, with a button to rename the chosen group (also F2 or a double click).
+
+        Args:
+            parent: The splitter.
+
+        Returns:
+            The column.
+        """
+        column = QWidget(parent)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self._groups_list = QListWidget(column)
         self._groups_list.setIconSize(self.GROUP_ICON)
         self._groups_list.setMinimumWidth(280)
         self._groups_list.setWordWrap(True)
         self._groups_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._groups_list.currentItemChanged.connect(self._on_group_chosen)
-        photos_column = self._make_photos_column(splitter)
-        self._people_panel = self._make_people_panel(splitter)
-        splitter.addWidget(self._groups_list)
-        splitter.addWidget(photos_column)
-        splitter.addWidget(self._people_panel)
-        splitter.setStretchFactor(1, 1)
-        return splitter
+        self._groups_list.itemDoubleClicked.connect(self._rename_chosen_group)
+        rename_button = self.make_button("Rename group…   (F2)", self._rename_chosen_group)
+        layout.addWidget(self._groups_list, 1)
+        layout.addWidget(rename_button)
+        return column
+
+    def _rename_chosen_group(self) -> None:
+        """Ask for a new name of the chosen group."""
+        group_id = self._chosen_group_id()
+        self.ask_group_name(group_id)
 
     def _make_photos_column(self, parent: QWidget) -> QWidget:
         """The photos of the chosen group, with buttons to select and unselect them.
@@ -231,8 +256,8 @@ class GroupPage(WorkflowPage):
         return column
 
     def _add_shortcuts(self) -> None:
-        """K selects and X unselects the chosen photos, as in the Filter step."""
-        keys = (("K", self._select_chosen), ("X", self._unselect_chosen))
+        """K selects and X unselects the chosen photos, as in the Filter step; F2 renames the chosen group."""
+        keys = (("K", self._select_chosen), ("X", self._unselect_chosen), ("F2", self._rename_chosen_group))
         for key, handler in keys:
             sequence = QKeySequence(key)
             shortcut = QShortcut(sequence, self)

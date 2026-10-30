@@ -72,7 +72,8 @@ def test_manifest_keeps_the_users_work(tmp_path: Path) -> None:
     other = RefinementPipeline("words-2", "Your words: less contrast", PipelineSource.WORDS, [contrast])
     project.add_pipeline(other)
     group = PhotoGroup("group-1", "Group 1", ["photo-a", "photo-b"], "photo-b", "14 Dec 2024", ["person-1"])
-    project.set_groups([group])
+    named_group = group.renamed_to("Tokyo Tower")
+    project.set_groups([named_group])
     project.choose("group-1", "words-1")
     project.set_option_used("group-1", "words-2", False)
     saved_name = SavedName("Papa", ("photo-b#0",))
@@ -87,6 +88,8 @@ def test_manifest_keeps_the_users_work(tmp_path: Path) -> None:
     assert opened.pipeline("words-1").describe_steps() == "Contrast +20 %"
     assert reopened_group.photo_ids == ("photo-a", "photo-b")
     assert reopened_group.person_ids == ("person-1",)
+    assert reopened_group.title == "Tokyo Tower"
+    assert reopened_group.renamed
     assert opened.choice_of("group-1").pipeline_id == "words-1"
     assert opened.saved_names() == [saved_name]
     assert opened.option_used_in("group-1", "words-1")

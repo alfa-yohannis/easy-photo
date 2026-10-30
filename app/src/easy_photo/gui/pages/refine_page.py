@@ -290,6 +290,9 @@ class RefinePage(WorkflowPage):
     def _show_group(self, group_id: str) -> None:
         """Show a group's title and versions; ask for the versions when they are not made yet.
 
+        The versions are only asked for while the page is shown, since each one
+        is a darktable development; :meth:`on_shown` asks when the page opens.
+
         Args:
             group_id: Id of the group, or an empty text for none.
         """
@@ -309,10 +312,11 @@ class RefinePage(WorkflowPage):
         versions = self._controller.versions(group_id)
         if versions:
             self._show_cards(versions)
-        else:
-            self._show_cards([])
-            self._waiting.setText("Making the versions…")
-            self._waiting.setVisible(True)
+            return
+        self._show_cards([])
+        self._waiting.setText("Making the versions…")
+        self._waiting.setVisible(True)
+        if self.isVisible():
             self._controller.render_versions(group_id)
 
     # ------------------------------------------------------------------ cards

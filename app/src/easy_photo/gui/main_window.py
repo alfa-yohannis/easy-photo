@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
         status_bar = self.statusBar()
         self._status_label = QLabel("")
         self._progress = QProgressBar()
-        self._progress.setFixedWidth(220)
+        self._progress.setFixedWidth(380)
         self._progress.setTextVisible(False)
         self._progress.setVisible(False)
         self._stop_button = QPushButton("Stop")
@@ -414,14 +414,25 @@ class MainWindow(QMainWindow):
         self._stop_button.setVisible(busy)
         if not busy:
             self._progress.reset()
+            self._progress.setTextVisible(False)
 
-    def _on_progress(self, done: int, total: int) -> None:
-        """Move the progress bar.
+    def _on_progress(self, done: int, total: int, item: str) -> None:
+        """Move the progress bar, and name the item being worked on with its number, such as "P1188489.RW2  3 / 6".
 
         Args:
             done: Items done.
             total: Items in total.
+            item: The item being worked on now (number ``done + 1``), or an empty text.
         """
         maximum = max(total, 1)
         self._progress.setMaximum(maximum)
         self._progress.setValue(done)
+        if not item or total <= 0:
+            self._progress.setTextVisible(False)
+            return
+        number = min(done + 1, total)
+        text = f"{item}  {number} / {total}"
+        # QProgressBar reads "%" as the start of a placeholder such as %p.
+        escaped = text.replace("%", "%%")
+        self._progress.setFormat(escaped)
+        self._progress.setTextVisible(True)
