@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QListWidget, QListWidgetItem, QSlider, QVBoxLayout, QWidget
 
 from easy_photo.gui.controller import ProjectController
@@ -119,6 +119,7 @@ class SourcePage(WorkflowPage):
         self._summary = self.make_label("", "Muted")
         self._grid = PhotoGrid(self._model, self._style, column)
         self._grid.set_show_badges(False)
+        self._grid.menu_requested.connect(self._show_photo_menu)
         size_label = self.make_label("Tile size", "Muted")
         size_slider = QSlider(Qt.Orientation.Horizontal, column)
         size_slider.setRange(140, 380)
@@ -180,6 +181,15 @@ class SourcePage(WorkflowPage):
             self._summary.setText(f"{found_text} found, {measured} measured so far.")
         else:
             self._summary.setText(f"{found_text} found and measured.")
+
+    def _show_photo_menu(self, photo_id: str, position: QPoint) -> None:
+        """Show a photo's right-click menu: open it, in darktable too, show it in its folder, or copy its path.
+
+        Args:
+            photo_id: Id of the photo under the mouse.
+            position: Where to show the menu, in screen coordinates.
+        """
+        self.show_photo_menu(self._grid, photo_id, position)
 
     def _remove_selected(self) -> None:
         """Remove the selected sources from the project."""

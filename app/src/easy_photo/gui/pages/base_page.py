@@ -4,11 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtWidgets import (
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.menus import DecisionWords, GroupMenu, PhotoMenu
 from easy_photo.gui.style import AppStyle
+from easy_photo.gui.widgets.photo_grid import PhotoGrid
+from easy_photo.wording import count_text
 
 
 class WorkflowPage(QWidget):
@@ -159,3 +171,87 @@ class WorkflowPage(QWidget):
             return
         known_ids = [group.id for group in known]
         self._controller.remove_groups(known_ids)
+
+    def ask_to_merge_groups(self, group_ids: Sequence[str]) -> None:
+        """Ask the user to confirm, then put groups together into one.
+
+        Args:
+            group_ids: Ids of the groups; unknown ids are left out, and fewer than two known groups do nothing.
+        """
+        project = self._controller.project
+        if project is None:
+            return
+        chosen = set(group_ids)
+        known = [group for group in project.groups if group.id in chosen]
+        if len(known) < 2:
+            return
+        first = known[0]
+        photo_ids: set[str] = set()
+        for group in known:
+            photo_ids.update(group.photo_ids)
+        group_count = len(known)
+        photo_count = len(photo_ids)
+        photos_text = count_text(photo_count, "photo")
+        text = (
+            f'Merge these {group_count} groups into "{first.title}"?\n\n'
+            f"The merged group holds all {photos_text}. It keeps this name, and the pick and preview of "
+            f'"{first.title}"; when that group has none, those of the next group that has one. The references '
+            "and typed versions of all the groups stay with it. To split the groups again, make groups again."
+        )
+        buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        answer = QMessageBox.question(self, "Merge groups", text, buttons, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        known_ids = [group.id for group in known]
+        self._controller.merge_groups(known_ids)
+
+    def show_photo_menu(
+        self,
+        grid: PhotoGrid,
+        photo_id: str,
+        position: QPoint,
+        words: DecisionWords | None = None,
+        group_id: str | None = None,
+    ) -> None:
+        """Show the right-click menu of a photo in a grid.
+
+        Args:
+            grid: The grid the photo is in; its selected photos are the chosen ones.
+            photo_id: Id of the photo under the mouse.
+            position: Where to show the menu, in screen coordinates.
+            words: What the page calls keeping and setting aside photos; None leaves those items out.
+            group_id: The group the grid shows; None leaves the group items out.
+        """
+        chosen_ids = grid.selected_photo_ids()
+        if photo_id not in chosen_ids:
+            chosen_ids = [photo_id]
+        menu = PhotoMenu(self._controller, photo_id, chosen_ids, words, group_id, self)
+        menu.exec(position)
+        menu.deleteLater()
+
+    def show_group_list_menu(self, group_list: QListWidget, position: QPoint) -> None:
+        """Show the right-click menu of the group under the mouse in a group list.
+
+        The list keeps each group's id in its items' user data. Qt has already
+        made the group under the mouse the current one.
+
+        Args:
+            group_list: The group list.
+            position: Where the user right-clicked, in the coordinates of the list's viewport.
+        """
+        item = group_list.itemAt(position)
+        if item is None:
+            return
+        group_id = item.data(Qt.ItemDataRole.UserRole)
+        selected_items = group_list.selectedItems()
+        chosen_ids = [selected.data(Qt.ItemDataRole.UserRole) for selected in selected_items]
+        if group_id not in chosen_ids:
+            chosen_ids = [group_id]
+        viewport = group_list.viewport()
+        screen_position = viewport.mapToGlobal(position)
+        menu = GroupMenu(self._controller, group_id, chosen_ids, self)
+        menu.rename_requested.connect(self.ask_group_name)
+        menu.merge_requested.connect(self.ask_to_merge_groups)
+        menu.remove_requested.connect(self.ask_to_remove_groups)
+        menu.exec(screen_position)
+        menu.deleteLater()

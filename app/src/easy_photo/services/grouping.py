@@ -44,24 +44,28 @@ class Grouper(ABC):
         sharpest = project.sharpest_of(photos)
         return sharpest.id
 
-    def _time_range(self, photos: Sequence[Photo]) -> str:
+    @classmethod
+    def time_range(cls, photos: Sequence[Photo]) -> str:
         """Describe when the photos of a group were taken.
 
         Args:
             photos: The photos, in time order.
 
         Returns:
-            Text such as "14 Dec 2024, 10:32 to 10:41", or an empty text when the times are unknown.
+            Text such as "14 Dec 2024, 10:32 to 10:41", or an empty text when
+            the times are unknown or there are no photos.
         """
+        if not photos:
+            return ""
         first = photos[0].info.taken_at
         last = photos[-1].info.taken_at
         if first is None or last is None:
             return ""
-        start = first.strftime(self.TIME_FORMAT)
+        start = first.strftime(cls.TIME_FORMAT)
         if first.date() == last.date():
             end = last.strftime("%H:%M")
         else:
-            end = last.strftime(self.TIME_FORMAT)
+            end = last.strftime(cls.TIME_FORMAT)
         if start.endswith(end):
             return start
         return f"{start} to {end}"
@@ -148,7 +152,7 @@ class SimilarityGrouper(Grouper):
         """
         photo_ids = [photo.id for photo in photos]
         sample_id = self._sample_of(photos, project)
-        details = self._time_range(photos)
+        details = self.time_range(photos)
         return PhotoGroup(f"group-{number}", f"Group {number}", photo_ids, sample_id, details)
 
 
@@ -215,7 +219,7 @@ class FaceGrouper(Grouper):
         title = self.title_for(person_ids, project)
         photo_ids = [photo.id for photo in photos]
         sample_id = self._sample_of(photos, project)
-        details = self._time_range(photos)
+        details = self.time_range(photos)
         return PhotoGroup(f"group-{number}", title, photo_ids, sample_id, details, person_ids)
 
     def title_for(self, person_ids: Sequence[str], project: Project) -> str:

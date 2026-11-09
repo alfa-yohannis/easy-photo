@@ -28,10 +28,11 @@ class ProjectManifest:
     A project is a folder with this file in it. The manifest holds everything
     the user decided: the sources, the options of each step, the user's own
     keep and set-aside decisions, the names given to people, the groups, the
-    refinement options with their steps, and the option picked for each group.
-    Measurements and previews are not saved; they are made again from the
-    photos when the project opens, which is quick because raw previews are
-    cached.
+    photo the user chose to stand for a group, the refinement options with
+    their steps, the option picked for each group, and the darktable edits
+    applied to single photos. Measurements and
+    preview pictures are not saved; they are made again from the photos when
+    the project opens, which is quick because raw previews are cached.
     """
 
     FILE_NAME = "easy-photo-project.json"
@@ -147,6 +148,9 @@ class ProjectManifest:
         }
         choices = {group_id: choice.pipeline_id for group_id, choice in project.choices.items()}
         unused_options = project.unused_options
+        chosen_samples = project.chosen_samples
+        photo_edits = {photo_id: str(edit_file) for photo_id, edit_file in project.photo_edits.items()}
+        applied_times = project.applied_times
         return {
             "format": self.FORMAT,
             "version": self.VERSION,
@@ -164,6 +168,9 @@ class ProjectManifest:
             "group_pipelines": group_pipelines,
             "choices": choices,
             "unused_options": unused_options,
+            "previews": chosen_samples,
+            "photo_edits": photo_edits,
+            "applied_sidecars": applied_times,
         }
 
     def _from_data(self, data: dict, folder: Path) -> Project:
@@ -205,7 +212,15 @@ class ProjectManifest:
         choices = {group_id: GroupChoice(pipeline_id) for group_id, pipeline_id in saved_choices.items()}
         saved_unused = data.get("unused_options", {})
         unused_options = {group_id: set(option_ids) for group_id, option_ids in saved_unused.items()}
-        project.restore_groups(groups, choices, group_pipelines, unused_options)
+        chosen_samples = data.get("previews", {})
+        project.restore_groups(groups, choices, group_pipelines, unused_options, chosen_samples)
+        saved_photo_edits = data.get("photo_edits", {})
+        for photo_id, edit_text in saved_photo_edits.items():
+            edit_file = Path(edit_text)
+            project.set_photo_edit(photo_id, edit_file)
+        saved_applied = data.get("applied_sidecars", {})
+        for photo_id, applied_at in saved_applied.items():
+            project.set_applied_at(photo_id, applied_at)
         return project
 
     def _group_to_data(self, group: PhotoGroup) -> dict:

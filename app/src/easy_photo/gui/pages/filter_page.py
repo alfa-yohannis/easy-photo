@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QSplitter, QVBoxLayout, QWidget
 
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.menus import DecisionWords
 from easy_photo.gui.pages.base_page import WorkflowPage
 from easy_photo.gui.photo_model import PhotoListModel
 from easy_photo.gui.style import AppStyle
@@ -27,6 +28,9 @@ class FilterPage(WorkflowPage):
     """The four views of the grid: a label and the decision it shows (None for all)."""
 
     LIMIT_DELAY_MS = 250
+
+    DECISION_WORDS = DecisionWords("Keep", "Set aside", "Undo my choice")
+    """What the photo menu calls the decisions of this step."""
 
     def __init__(self, controller: ProjectController, style: AppStyle, parent: QWidget | None = None) -> None:
         """Create the page.
@@ -146,6 +150,7 @@ class FilterPage(WorkflowPage):
         splitter = QSplitter(Qt.Orientation.Horizontal, parent)
         self._grid = PhotoGrid(self._model, self._style, splitter)
         self._grid.current_photo_changed.connect(self._on_current_changed)
+        self._grid.menu_requested.connect(self._show_photo_menu)
         self._inspector = PhotoInspector(self._style, splitter)
         self._inspector.setMinimumWidth(360)
         self._inspector.keep_clicked.connect(self._keep_selected)
@@ -156,6 +161,15 @@ class FilterPage(WorkflowPage):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         return splitter
+
+    def _show_photo_menu(self, photo_id: str, position: QPoint) -> None:
+        """Show a photo's right-click menu, with keeping and setting aside the chosen photos.
+
+        Args:
+            photo_id: Id of the photo under the mouse.
+            position: Where to show the menu, in screen coordinates.
+        """
+        self.show_photo_menu(self._grid, photo_id, position, self.DECISION_WORDS)
 
     def _add_shortcuts(self) -> None:
         """K keeps, X sets aside and U undoes the user's choice, for the selected photos."""

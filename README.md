@@ -36,15 +36,19 @@ py -3.12 -m venv .venv
 
 `easy-photo PATH` opens the project at `PATH` directly. Run the tests with `.venv/bin/python -m pytest` (or `.venv\Scripts\python -m pytest`).
 
+On Linux, `./run.sh --install-launcher` (or `app/.venv/bin/easy-photo --install-launcher`) adds easy-photo to the applications menu of KDE Plasma, GNOME and the other freedesktop.org desktops, and puts a shortcut on the desktop. It writes the icon into `~/.local/share/icons/hicolor` (the SVG file and PNG files from 16 to 512 px), the launcher into `~/.local/share/applications/easy-photo.desktop`, and an executable copy of the launcher into your desktop folder, so Plasma starts it without asking first. The launcher runs the `easy-photo` program of this virtual environment. `--remove-launcher` takes all of it away again. The window tells the desktop it belongs to this launcher, so the task bar shows the app's icon and can pin it.
+
+Help > About shows the version, the programs the app found (darktable-cli, darktable, Claude Code) with the library versions, and the folders where the app keeps its settings, caches and lasting files. The text can be copied, for example into a bug report.
+
 Three things are optional:
 
 - Face recognition needs two model files from the OpenCV model zoo (about 40 MB). The Group step has a button that downloads them, or you can point it at a folder that already has them.
-- darktable 4.6 or newer, to develop raw files from their raw data and to apply darktable edits (`.xmp` files). Without it, raw files are exported from the small JPEG preview the camera stores inside them. The app finds `darktable-cli` on the PATH or in `C:\Program Files\darktable\bin`.
+- darktable 4.6 or newer, to develop raw files from their raw data, to apply darktable edits (`.xmp` files), and to open photos in darktable from their right-click menu. Without it, raw files are exported from the small JPEG preview the camera stores inside them. The app finds `darktable-cli` on the PATH or in `C:\Program Files\darktable\bin`, and darktable itself in the same folder.
 - [Claude Code](https://claude.com/claude-code), logged in, for typed refinements the app's own phrases do not cover (see below).
 
 ## Projects
 
-A project is a folder with a manifest file, `easy-photo-project.json`. The manifest holds everything you decided: the sources, the limits of the filter, your own keep and set-aside choices, the names you gave people, the groups, the refinement options with their steps, and the option picked for each group. One project is open at a time; the start screen lists recent ones. Every change is saved a moment after you make it.
+A project is a folder with a manifest file, `easy-photo-project.json`. The manifest holds everything you decided: the sources, the limits of the filter, your own keep and set-aside choices, the names you gave people, the groups, the photo you chose as a group's preview, the refinement options with their steps, the option picked for each group, and the photos that keep a sidecar applied to them alone. One project is open at a time; the start screen lists recent ones. Every change is saved a moment after you make it.
 
 Measurements are not stored in the manifest. They are made again when a project opens, which is quick because the previews of raw files are cached.
 
@@ -56,7 +60,27 @@ Measurements are not stored in the manifest. They are made again when a project 
 
 While a step works through files, the progress bar in the status bar names the file it is on and how far it is, such as `P1188489.RW2  3 / 6`; the Stop button ends the job after the current file.
 
-Right-click any photo tile for "Open the file" (in the program your system uses for it) or "Show in folder" (Explorer on Windows, or the file manager on Linux, with the file selected where the file manager supports it). The Filter step has the same two buttons under the large photo, the Refine step has "Show photo in folder" for the photo its versions are made on, and in the Export results a double click shows the exported file in its folder.
+Right-click menus:
+
+- A photo tile offers "Open in darktable", "Refresh preview" (see below), "Open the file" (in the program your system uses for it), "Show in folder" (Explorer on Windows, or the file manager on Linux, with the file selected where the file manager supports it), "Copy path" and "Export" (see Export). In the Filter step it also keeps, sets aside or gives back to the app the selected photos (K, X, U). In the Group step it selects or unselects them, makes the photo the group's preview ("Use as the group's preview"), and has "Apply sidecar to" and "Apply sidecar from" (see below).
+- A group, in the group lists of the Group and Refine steps, offers the same for its preview: "Open in darktable", "Open the file", "Show in folder", "Apply sidecar to" and "Apply sidecar from". "Refresh previews" develops the pictures of all its photos, its preview first. It also selects or unselects all of its photos, exports them, and renames, merges or removes it. With several groups selected, selecting, unselecting, refreshing, exporting, merging, removing and "Apply sidecar from" act on all of them.
+
+An item that cannot be used is greyed out, with the reason in brackets, such as "(no darktable edit yet)". The Filter step also has "Open the file" and "Show in folder" buttons under the large photo, the Refine step has "Show photo in folder" for the photo its versions are made on, and in the Export results a double click shows the exported file in its folder.
+
+Applying a sidecar copies a darktable edit from one photo to others, so you don't edit each photo from the start in darktable. It works in four directions:
+
+| from | to | menu item |
+|---|---|---|
+| a group (its preview's edit) | a group | group: "Apply sidecar to" > this group, the selected groups, another group or all groups; or "Apply sidecar from" > A group |
+| a group | a photo | photo: "Apply sidecar from" > A group |
+| a photo | a group | photo: "Apply sidecar to" > its group, another group or all groups; or group: "Apply sidecar from" > A photo |
+| a photo | a photo | photo: "Apply sidecar to" > the other selected photos; or "Apply sidecar from" > A photo |
+
+"Apply sidecar from" > "A file…" takes the edit from any `.xmp` file, or from a raw file you edited. The edit is written into each target photo's own sidecar, the way darktable's paste of a history does, so darktable opens the photo with the edit as a starting point. The history is replaced, without the parts that only fit the photo the edit was made for (crop, perspective, retouch, drawn masks and the like); the rating, color labels and tags in the old sidecar stay. Before a photo's own darktable edit is replaced, the app asks, and every old sidecar is copied to `sidecar backups/<date and time>/` in the project folder first. Only raw files take a darktable edit; JPEG files are left out, and so is the photo the edit comes from. A group whose pick carries another darktable edit, or has no pick yet, gets the unchanged option, so its photos are exported with their sidecars. A photo that took a sidecar on its own keeps it even when its group picks another darktable edit, until you choose "Follow the group's pick again".
+
+"Open in darktable" starts darktable with the photo, or hands it to darktable when darktable is open already. darktable reads the photo's sidecar when it imports the photo, and again when the app opens the photo in it; a photo darktable already knows keeps darktable's own history until then. darktable writes your edit into the photo's sidecar file (`P1209499.RW2.xmp`), and the app reads it from there: when you come back to the app's window, it notices the new edit, makes the photo its group's preview, and makes the Refine versions again.
+
+The thumbnail of a raw file starts as the JPEG preview the camera stored in it, which knows nothing of darktable. "Refresh preview" in a photo's menu (for the selected photos) and "Refresh previews" in a group's menu develop the raw files with `darktable-cli` and their own sidecars at 320 px, in the background, and show the result in the photo grids and the group lists. That takes one to three seconds per photo. The app does it by itself for the previews of the groups that got an edit from "Apply sidecar", for photos that took a sidecar on their own, and for photos it notices you edited in darktable. The pictures are kept in the app's cache folder under `developed`, named after the raw file and the bytes of its sidecar, so they come back when the project opens again, and a changed sidecar gets a new picture. A raw file without a sidecar is developed with darktable's defaults, which often look darker and flatter than the camera's preview; the export develops it the same way.
 
 ### 1. Source
 
@@ -76,14 +100,18 @@ Sharpness and detail are measured in nine overlapping windows, each half the wid
 
 Photos are grouped one of two ways:
 
-- Similar photos: neighbouring photos share a group when the pause between them is short (10 minutes by default) and they look alike (colors and rough layout).
+- Similar photos: neighbouring photos share a group when the pause between them is short (10 minutes by default) and they look alike (colors and rough layout). Both limits can be typed; the "alike at least" percentage also has a slider.
 - Same people: the app finds faces with YuNet, describes them with SFace, and sorts them into people. Photos with the same people form a group. You can rename people and merge two that are the same person.
 
-The sharpest of a group's selected photos stands for it in the list and in the Refine step. Within a group you can select and unselect photos one by one (K and X) or all at once; unselected photos stay in the group but are not exported, and when you unselect the sharpest one, the next sharpest takes its place.
+One photo stands for each group, in the list, in the Refine step, and in the group's right-click menu: its preview. Among the group's selected photos, that is the photo you chose with "Use as the group's preview"; otherwise the photo you edited in darktable most recently, since its sidecar holds an edit you may want for the whole group; otherwise the sharpest one. A sidecar the app wrote with "Apply sidecar" counts as your edit only after darktable writes it again, for example once you change the edit there. "Choose the preview automatically" in the group's menu forgets your choice. The app tells your edits from darktable's own set-up on import by the history hashes darktable keeps in each sidecar. It reads a sidecar once and then only checks its file time, which takes about 20 ms for 500 photos, in the background.
+
+Within a group you can select and unselect photos one by one (K and X) or all at once; unselected photos stay in the group but are not exported, and when you unselect the preview, the next photo by the rules above takes its place.
 
 Rename a group with "Rename group…" under the group list, F2 or a double click; the References step has the same button next to "References for". A name you give stays when people are renamed, and its picks and references stay with it. Making the groups again starts over with new groups and names.
 
 Remove groups you do not want with "Remove…" (or the Delete key); Ctrl and Shift select several at once, and the References step has a "Remove group…" button too. The app asks first. A removed group's photos stay in the project but are not exported; its pick, its typed versions and the references made only for it go with it. Making the groups again brings the photos back into groups.
+
+Merge groups by selecting two or more (Ctrl or Shift) and choosing "Merge…" under the list, or "Merge N groups…" in their right-click menu. The app asks first. The merged group takes the place and the name of the first of them in the list, and holds all their photos in time order, with a new time range. It keeps the first group's pick and chosen preview; when that group has none, the next group that has one gives its own. The references any of the groups used, and the versions typed for any of them, stay with it. Making the groups again splits them.
 
 ### 4. References
 
@@ -95,13 +123,13 @@ Each group has its own references. Choose the group in "References for" at the t
 - darktable edits: a raw file you edited in darktable (under Examples), or a darktable sidecar (`.xmp` file, under Examples or Your history). `darktable-cli` applies the edit itself to every raw photo of the group, module by module, as darktable does when you paste a copied history. The parts that only fit the edited photo are left out: crop, perspective, orientation, retouch, spots, liquify, lens correction, the raw black and white points, and any module with a drawn mask. A raw file counts as edited when its sidecar's history differs from what darktable set up on import (darktable keeps a hash of both). The option points at the sidecar, so if you change the edit in darktable later, the next export uses the new version.
 - Your own words, such as "brighter faces, less contrast" or "neutral, not warm, not cool".
 
-`darktable-cli` always runs in its own settings folder with a library in memory, so your darktable library and sidecar files are never touched.
+`darktable-cli` always runs in its own settings folder with a library in memory, so your darktable library is never touched. Sidecar files are written only by "Apply sidecar", and only after the old ones are backed up.
 
 The unchanged photo is always an option too: darktable's development of it (with the photo's own sidecar when it has one), or the camera's picture when darktable is not installed.
 
 ### 5. Refine
 
-For each group, its options are shown side by side on the sharpest of its selected photos, together with a slightly brighter and a slightly darker copy of its newest reference option. Each version is made the way the export makes it, at 1280 px: the same darktable development (about three seconds for each darktable edit among the options), the same steps, and the same light sharpen when the export sharpens. "Recalculate" (F5) makes the versions again, for example after you changed a darktable edit in darktable; other groups get new versions when you open them. Pick one with a click or the keys 1 to 9; it applies to every photo of the group. If none fits, type the change you want. The app makes that version at once, on top of the version you had picked, and picks it. You can also skip a group.
+For each group, its options are shown side by side on the group's preview (see Group), together with a slightly brighter and a slightly darker copy of its newest reference option. Each version is made the way the export makes it, at 1280 px: the same darktable development (about three seconds for each darktable edit among the options), the same steps, and the same light sharpen when the export sharpens. "Recalculate" (F5) makes the versions again, for example after you changed a darktable edit in darktable; other groups get new versions when you open them. Pick one with a click or the keys 1 to 9; it applies to every photo of the group. If none fits, type the change you want. The app makes that version at once, on top of the version you had picked, and picks it. You can also skip a group.
 
 Brightness options change the whole photo with one curve and keep the colors, so faces are never lifted as a bright patch on a darker photo.
 
@@ -112,6 +140,8 @@ Every kept photo of the groups with a pick is developed, refined and written as 
 A raw file is developed by `darktable-cli` from its raw data, at full size and shrunk to the export size at the end, with the picked option's darktable edit, or else the photo's own sidecar, or darktable's default development when it has none. darktable hands the result over as a 16-bit PNG in a temporary folder. The app applies the option's own steps to it, sharpens it a little (radius 0.75 px at 75 %; this can be switched off), and compresses it once, into the JPEG, with an sRGB color profile. That takes about three seconds per photo. `darktable-cli` develops one photo at a time at low priority, so the computer stays usable.
 
 Without darktable, a raw file is exported from the camera's JPEG preview, which is about 1920 px wide and already compressed, so the export has visibly less detail and smaller files.
+
+The right-click menus export parts of the project with the settings of this step. A photo's "Export" writes that photo or the selected photos, whether or not they are selected for export in the Group step. Its group, a group, the selected groups and "All groups" write the selected photos of those groups. Each photo gets its group's pick. A group without a pick yet is exported unchanged, and a skipped group is left out of group exports; a photo you export on its own is written unchanged when its group has no pick or is skipped. The results show in this step's list.
 
 ## What you can type
 
@@ -161,8 +191,8 @@ The code is object-oriented, with one job per class and plain names. Everything 
 |---|---|---|
 | `easy_photo.model` | the data: photos, check results, groups, faces, people, the project | `Photo`, `QualityResult`, `PhotoGroup`, `Person`, `Project` |
 | `easy_photo.refinement` | the refinement steps, the options made of them, typed commands | `RefinementStep` and its subclasses, `RefinementPipeline`, `CommandParser`, `BrightnessCurve` |
-| `easy_photo.services` | the work: reading, developing, measuring, checking, faces, grouping, references, export, manifest | `PhotoReader`, `PhotoDeveloper`, `DarktableRenderer`, `DarktableEdit`, `PhotoAnalyzer`, `QualityChecker`, `FaceFinder`, `Grouper`, `PipelineBuilder`, `Exporter`, `ProjectManifest` |
-| `easy_photo.gui` | the PySide6 window | `ProjectController`, `MainWindow`, one `WorkflowPage` subclass per step |
+| `easy_photo.services` | the work: reading, developing, measuring, checking, faces, grouping, references, export, manifest | `PhotoReader`, `PhotoDeveloper`, `DarktableRenderer`, `DarktableLauncher`, `DarktableEdit`, `EditedPhotos`, `SidecarWriter`, `DevelopedThumbnails`, `PhotoAnalyzer`, `QualityChecker`, `FaceFinder`, `Grouper`, `PipelineBuilder`, `Exporter`, `ProjectManifest` |
+| `easy_photo.gui` | the PySide6 window | `ProjectController`, `MainWindow`, one `WorkflowPage` subclass per step, `PhotoMenu` and `GroupMenu` for the right-click menus, `AboutDialog`, `AppIcon`, `DesktopEntryInstaller` for the Linux launcher |
 
 The places where the app can grow are abstract classes: a new filter rule is a `QualityCheck`, a new way to group is a `Grouper`, a new kind of reference is a `PipelineBuilder`, a new refinement is a `RefinementStep`, and a new search service is a `WebSearch`. `AppServices.create` makes and connects all services in one place, and `ProjectController` runs slow work on a two-thread pool and stores the results in the project on the window thread.
 
@@ -191,6 +221,7 @@ Python fits because the manual workflow already ran as Python scripts, and the s
 | `run.sh` | starts the app on Ubuntu, making `app/.venv` on the first run |
 | `app/pyproject.toml` | the package, its dependencies, and the `easy-photo` command |
 | `app/src/easy_photo/` | the source |
+| `app/src/easy_photo/resources/easy-photo.svg` | the app's icon |
 | `app/tests/` | the tests, including an end-to-end test of the window that runs without a screen |
 | `images` | link to the local photo library (`/data1/images` on the development machine), ignored by git |
 

@@ -78,6 +78,14 @@ class Project:
         self._group_pipelines: dict[str, list[RefinementPipeline]] = {}
         self._choices: dict[str, GroupChoice] = {}
         self._unused_options: dict[str, set[str]] = {}
+        self._chosen_samples: dict[str, str] = {}
+        """Ids of the photos the user chose to stand for groups (their previews), by group id."""
+        self._edited_at: dict[str, float] = {}
+        """When the user last edited a photo in darktable (its sidecar's file time), for the photos they edited."""
+        self._photo_edits: dict[str, Path] = {}
+        """darktable edits (XMP files) applied to single photos, by photo id."""
+        self._applied_at: dict[str, float] = {}
+        """The file time of the sidecars the app wrote ("Apply sidecar"), by photo id."""
 
     # ----------------------------------------------------------------- basics
 
@@ -190,6 +198,97 @@ class Project:
         self._quality = self._keep_known(self._quality)
         self._summaries = self._keep_known(self._summaries)
         self._faces = self._keep_known(self._faces)
+        self._edited_at = self._keep_known(self._edited_at)
+
+    def set_edited_at(self, photo_id: str, edited_at: float | None) -> None:
+        """Store when the user last edited a photo in darktable.
+
+        Args:
+            photo_id: Id of the photo.
+            edited_at: The time its sidecar was last written, when it holds the
+                user's own edit; None when the user has not edited the photo.
+        """
+        if edited_at is None:
+            self._edited_at.pop(photo_id, None)
+            return
+        self._edited_at[photo_id] = edited_at
+
+    def edited_at(self, photo_id: str) -> float | None:
+        """When the user last edited a photo in darktable.
+
+        Args:
+            photo_id: Id of the photo.
+
+        Returns:
+            The time its sidecar was last written, or None when the user has not edited the photo.
+        """
+        return self._edited_at.get(photo_id)
+
+    def set_applied_at(self, photo_id: str, applied_at: float | None) -> None:
+        """Store the file time of a sidecar the app wrote, so its edit is not taken for one the user made.
+
+        Args:
+            photo_id: Id of the photo.
+            applied_at: The time the app wrote its sidecar, or None to forget it.
+        """
+        if applied_at is None:
+            self._applied_at.pop(photo_id, None)
+            return
+        self._applied_at[photo_id] = applied_at
+
+    @property
+    def applied_times(self) -> dict[str, float]:
+        """The file times of the sidecars the app wrote, by photo id, for the manifest."""
+        return dict(self._applied_at)
+
+    def edited_by_user(self, photo_id: str) -> bool:
+        """Tell whether the user edited a photo in darktable themselves.
+
+        A sidecar the app wrote counts once darktable wrote it again, for
+        example after the user changed the edit there.
+
+        Args:
+            photo_id: Id of the photo.
+
+        Returns:
+            True when the photo's sidecar holds an edit the app did not write as it is now.
+        """
+        edited_at = self._edited_at.get(photo_id)
+        if edited_at is None:
+            return False
+        applied_at = self._applied_at.get(photo_id)
+        return edited_at != applied_at
+
+    def set_photo_edit(self, photo_id: str, edit_file: Path | None) -> None:
+        """Apply a darktable edit to one photo, or take it away again.
+
+        The photo is then developed with that edit, whatever its group picks;
+        the pick's other steps still apply.
+
+        Args:
+            photo_id: Id of the photo.
+            edit_file: XMP file of the edit, or None to develop the photo as its group's pick says.
+        """
+        if edit_file is None:
+            self._photo_edits.pop(photo_id, None)
+            return
+        self._photo_edits[photo_id] = edit_file
+
+    def photo_edit_of(self, photo_id: str) -> Path | None:
+        """The darktable edit applied to one photo.
+
+        Args:
+            photo_id: Id of the photo.
+
+        Returns:
+            The edit's XMP file, or None when no edit was applied to the photo alone.
+        """
+        return self._photo_edits.get(photo_id)
+
+    @property
+    def photo_edits(self) -> dict[str, Path]:
+        """The darktable edits applied to single photos, by photo id, for the manifest."""
+        return dict(self._photo_edits)
 
     @property
     def photos(self) -> list[Photo]:
@@ -486,6 +585,7 @@ class Project:
         self._choices.clear()
         self._group_pipelines.clear()
         self._unused_options.clear()
+        self._chosen_samples.clear()
 
     def restore_groups(
         self,
@@ -493,19 +593,22 @@ class Project:
         choices: dict[str, GroupChoice],
         group_pipelines: dict[str, list[RefinementPipeline]],
         unused_options: dict[str, set[str]],
+        chosen_samples: dict[str, str],
     ) -> None:
-        """Put back groups, choices, typed options and turned-off options read from the manifest.
+        """Put back groups, choices, typed options, turned-off options and chosen previews read from the manifest.
 
         Args:
             groups: The saved groups.
             choices: The saved choices, by group id.
             group_pipelines: The saved typed options, by group id.
             unused_options: Ids of the shared options turned off for each group.
+            chosen_samples: Ids of the photos the user chose to stand for groups, by group id.
         """
         self._groups = list(groups)
         self._choices = dict(choices)
         self._group_pipelines = dict(group_pipelines)
         self._unused_options = {group_id: set(option_ids) for group_id, option_ids in unused_options.items()}
+        self._chosen_samples = dict(chosen_samples)
 
     def selected_photos_of(self, group: PhotoGroup) -> list[Photo]:
         """The photos of a group that are selected (kept), so they are exported.
@@ -525,10 +628,13 @@ class Project:
         return selected
 
     def sample_of(self, group: PhotoGroup) -> Photo | None:
-        """The photo that stands for a group in the Refine step: the sharpest of its selected photos.
+        """The photo that stands for a group (its preview).
 
-        When none of its photos is selected, the photo picked when the group
-        was made stands for it.
+        Among the group's selected photos, that is the photo the user chose;
+        otherwise the photo the user edited in darktable most recently, since
+        its sidecar holds an edit to apply to the group; otherwise the
+        sharpest photo. When none of its photos is selected, the photo picked
+        when the group was made stands for it.
 
         Args:
             group: The group.
@@ -537,6 +643,13 @@ class Project:
             The photo, or None when none of the group's photos is in the project.
         """
         selected = self.selected_photos_of(group)
+        chosen_id = self._chosen_samples.get(group.id)
+        for photo in selected:
+            if photo.id == chosen_id:
+                return photo
+        edited = self.latest_edited_of(selected)
+        if edited is not None:
+            return edited
         if selected:
             return self.sharpest_of(selected)
         stored = self._photos.get(group.sample_id)
@@ -547,6 +660,26 @@ class Project:
             if photo is not None:
                 return photo
         return None
+
+    def latest_edited_of(self, photos: Sequence[Photo]) -> Photo | None:
+        """The photo the user edited in darktable most recently; sidecars the app wrote do not count.
+
+        Args:
+            photos: The photos to look at.
+
+        Returns:
+            That photo, or None when the user edited none of them.
+        """
+        latest: Photo | None = None
+        latest_time = 0.0
+        for photo in photos:
+            if not self.edited_by_user(photo.id):
+                continue
+            edited_at = self._edited_at[photo.id]
+            if latest is None or edited_at > latest_time:
+                latest = photo
+                latest_time = edited_at
+        return latest
 
     def sharpest_of(self, photos: Sequence[Photo]) -> Photo:
         """The sharpest of some photos, by the sharpness the Filter step measured.
@@ -582,6 +715,72 @@ class Project:
         self._choices.pop(group_id, None)
         self._group_pipelines.pop(group_id, None)
         self._unused_options.pop(group_id, None)
+        self._chosen_samples.pop(group_id, None)
+
+    def merge_groups(self, merged: PhotoGroup, other_ids: Sequence[str]) -> None:
+        """Put a merged group in the place of the first group it was made from, and drop the other groups.
+
+        The merged group has the first group's id, so that group's pick and
+        chosen preview stay; when it has none, the first of the other groups
+        that has one gives its own. A shared option stays on when any of the
+        groups used it, and the typed options of all the groups go to the
+        merged group.
+
+        Args:
+            merged: The merged group, with the id of the first group.
+            other_ids: Ids of the other groups, in the order of the group list.
+        """
+        merged_id = merged.id
+        group_ids = [merged_id, *other_ids]
+        for other_id in other_ids:
+            if merged_id not in self._choices and other_id in self._choices:
+                self._choices[merged_id] = self._choices[other_id]
+            if merged_id not in self._chosen_samples and other_id in self._chosen_samples:
+                self._chosen_samples[merged_id] = self._chosen_samples[other_id]
+        typed: list[RefinementPipeline] = []
+        for group_id in group_ids:
+            own = self._group_pipelines.get(group_id, [])
+            typed.extend(own)
+        none_unused: set[str] = set()
+        unused_sets = [self._unused_options.get(group_id, none_unused) for group_id in group_ids]
+        unused_everywhere = set.intersection(*unused_sets)
+        for other_id in other_ids:
+            self.remove_group(other_id)
+        self._group_pipelines.pop(merged_id, None)
+        self._unused_options.pop(merged_id, None)
+        if typed:
+            self._group_pipelines[merged_id] = typed
+        if unused_everywhere:
+            self._unused_options[merged_id] = unused_everywhere
+        self._groups = [merged if group.id == merged_id else group for group in self._groups]
+
+    def chosen_sample_of(self, group_id: str) -> str | None:
+        """The photo the user chose to stand for a group (its preview), when they chose one.
+
+        Args:
+            group_id: Id of the group.
+
+        Returns:
+            Id of the photo, or None when the sharpest selected photo stands for the group.
+        """
+        return self._chosen_samples.get(group_id)
+
+    def choose_sample(self, group_id: str, photo_id: str | None) -> None:
+        """Let a photo stand for its group (the group's preview), or go back to the sharpest selected photo.
+
+        Args:
+            group_id: Id of the group.
+            photo_id: Id of a photo of the group, or None for the sharpest selected photo.
+        """
+        if photo_id is None:
+            self._chosen_samples.pop(group_id, None)
+            return
+        self._chosen_samples[group_id] = photo_id
+
+    @property
+    def chosen_samples(self) -> dict[str, str]:
+        """The photos the user chose to stand for groups, by group id, for the manifest."""
+        return dict(self._chosen_samples)
 
     def replace_groups(self, groups: Sequence[PhotoGroup]) -> None:
         """Replace the group objects but keep the choices, for groups that only got a new title.

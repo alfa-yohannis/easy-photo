@@ -144,6 +144,17 @@ class RefinementPipeline:
         new_source = source or self._source
         return RefinementPipeline(pipeline_id, name, new_source, steps, self._details, self._darktable_edit)
 
+    def with_darktable_edit(self, darktable_edit: Path) -> RefinementPipeline:
+        """The same pipeline with another darktable edit, for a photo that has its own edit applied.
+
+        Args:
+            darktable_edit: XMP file of the edit that replaces this pipeline's edit.
+
+        Returns:
+            The new pipeline, with this pipeline's id, name and steps. This pipeline does not change.
+        """
+        return RefinementPipeline(self._id, self._name, self._source, self._steps, self._details, darktable_edit)
+
     def apply(self, linear: np.ndarray, context: StepContext) -> np.ndarray:
         """Run all steps on a photo.
 

@@ -1,4 +1,4 @@
-"""Developing raw files with darktable-cli."""
+"""Developing raw files with darktable-cli, and opening photos in darktable itself."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import numpy as np
 
 
 class DarktableError(Exception):
-    """Raised when darktable-cli cannot develop a file."""
+    """Raised when darktable-cli cannot develop a file, or darktable cannot be started."""
 
 
 class DarktableRenderer:
@@ -70,6 +70,11 @@ class DarktableRenderer:
     def available(self) -> bool:
         """True when darktable-cli was found."""
         return self._executable is not None
+
+    @property
+    def executable(self) -> Path | None:
+        """The darktable-cli program, or None when it is not installed."""
+        return self._executable
 
     def sidecar_for(self, raw: Path) -> Path | None:
         """Find the darktable sidecar file of a raw file.
@@ -275,3 +280,109 @@ class DarktableRenderer:
         if not lines:
             return ""
         return lines[-1]
+
+
+class DarktableLauncher:
+    """Opens photos in darktable itself, the program with the window, where the user edits them.
+
+    darktable runs on its own: the app does not wait for it, and closing the
+    app leaves it open. When darktable is open already, it shows the photo in
+    the open window by itself. darktable writes the user's edit into the
+    photo's sidecar file, where the app reads it.
+    """
+
+    WINDOWS_PATH = Path("C:/Program Files/darktable/bin/darktable.exe")
+
+    def __init__(self, executable: Path | None) -> None:
+        """Create a launcher.
+
+        Args:
+            executable: The darktable program, or None when it is not installed.
+        """
+        self._executable = executable
+
+    @classmethod
+    def locate(cls, darktable_cli: Path | None) -> DarktableLauncher:
+        """Find darktable: next to darktable-cli, on the PATH, or in the usual Windows folder.
+
+        Args:
+            darktable_cli: The darktable-cli program, or None when it was not found.
+
+        Returns:
+            A launcher; check :attr:`available` before using it.
+        """
+        if darktable_cli is not None:
+            program_name = f"darktable{darktable_cli.suffix}"
+            beside = darktable_cli.with_name(program_name)
+            if beside.exists():
+                return cls(beside)
+        found = shutil.which("darktable")
+        if found:
+            found_path = Path(found)
+            return cls(found_path)
+        if cls.WINDOWS_PATH.exists():
+            return cls(cls.WINDOWS_PATH)
+        return cls(None)
+
+    @property
+    def available(self) -> bool:
+        """True when darktable was found."""
+        return self._executable is not None
+
+    @property
+    def executable(self) -> Path | None:
+        """The darktable program, or None when it is not installed."""
+        return self._executable
+
+    def command_for(self, photo: Path) -> list[str]:
+        """The command line that opens a photo in darktable.
+
+        Args:
+            photo: The photo file.
+
+        Returns:
+            The program and the photo.
+        """
+        program = str(self._executable)
+        photo_text = str(photo)
+        return [program, photo_text]
+
+    def open(self, photo: Path) -> subprocess.Popen:
+        """Start darktable with a photo, without waiting for darktable to close.
+
+        Args:
+            photo: The photo file.
+
+        Returns:
+            The started program. The app does not wait for it; tests can.
+
+        Raises:
+            DarktableError: When darktable is missing or cannot be started.
+        """
+        if self._executable is None:
+            raise DarktableError("darktable was not found. Install darktable to open photos in it.")
+        command = self.command_for(photo)
+        flags = self._start_flags()
+        try:
+            return subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                creationflags=flags,
+            )
+        except OSError as error:
+            raise DarktableError(f"darktable could not be started: {error}") from error
+
+    def _start_flags(self) -> int:
+        """Flags that start darktable on its own on Windows, without a console window.
+
+        On Linux and macOS, a new session does the same (``start_new_session``).
+
+        Returns:
+            The flags for subprocess; 0 on other systems.
+        """
+        if sys.platform == "win32":
+            return subprocess.DETACHED_PROCESS
+        return 0

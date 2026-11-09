@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.menus import DecisionWords
 from easy_photo.gui.pages.base_page import WorkflowPage
 from easy_photo.gui.photo_model import PhotoListModel
 from easy_photo.gui.style import AppStyle
@@ -35,6 +37,9 @@ class GroupPage(WorkflowPage):
 
     GROUP_ICON = QSize(96, 72)
     FACE_ICON = QSize(56, 56)
+
+    DECISION_WORDS = DecisionWords("Select", "Unselect")
+    """What the photo menu calls the decisions of this step."""
 
     def __init__(self, controller: ProjectController, style: AppStyle, parent: QWidget | None = None) -> None:
         """Create the page.
@@ -71,6 +76,9 @@ class GroupPage(WorkflowPage):
         controller.faces_changed.connect(self._on_faces_changed)
         controller.photo_updated.connect(self._model.refresh_photo)
         controller.analysis_changed.connect(self._on_selection_changed)
+        controller.sample_changed.connect(self._on_sample_changed)
+        controller.edits_changed.connect(self._on_selection_changed)
+        controller.thumbnail_changed.connect(self._on_thumbnail_changed)
 
     def is_ready(self) -> bool:
         """The user can go on once there are groups.
@@ -101,6 +109,7 @@ class GroupPage(WorkflowPage):
         self._show_options(project.grouping)
         self._refresh_groups()
         self._on_faces_changed()
+        self._controller.check_edits()
         kept = project.kept_photos()
         if not project.groups and kept and not project.grouping.by_people:
             self._make_groups()
@@ -124,12 +133,19 @@ class GroupPage(WorkflowPage):
         self._gap.setRange(1, 600)
         self._gap.setSuffix(" min")
         self._gap.setToolTip("Longest pause between two photos of the same group")
+        similarity_tip = "How alike two neighbouring photos must look to share a group"
         self._similarity = QSlider(Qt.Orientation.Horizontal)
         self._similarity.setRange(0, 100)
         self._similarity.setFixedWidth(150)
-        self._similarity.setToolTip("How alike two neighbouring photos must look to share a group")
-        self._similarity_value = self.make_label("", "Muted")
-        self._similarity.valueChanged.connect(self._show_similarity)
+        self._similarity.setToolTip(similarity_tip)
+        # The slider and the box show the same percentage: drag the one, or type in the other.
+        self._similarity_box = QSpinBox()
+        self._similarity_box.setRange(0, 100)
+        self._similarity_box.setSuffix(" %")
+        self._similarity_box.setToolTip(similarity_tip)
+        self._similarity_box.setKeyboardTracking(False)
+        self._similarity.valueChanged.connect(self._similarity_box.setValue)
+        self._similarity_box.valueChanged.connect(self._similarity.setValue)
         self._gap_label = self.make_label("Longest pause")
         self._similarity_label = self.make_label("Alike at least")
         make_button = self.make_button("Make groups", self._make_groups, primary=True)
@@ -145,7 +161,7 @@ class GroupPage(WorkflowPage):
         row.addSpacing(10)
         row.addWidget(self._similarity_label)
         row.addWidget(self._similarity)
-        row.addWidget(self._similarity_value)
+        row.addWidget(self._similarity_box)
         row.addStretch(1)
         row.addWidget(make_button)
         return row
@@ -193,10 +209,10 @@ class GroupPage(WorkflowPage):
         return splitter
 
     def _make_groups_column(self, parent: QWidget) -> QWidget:
-        """The group list, with buttons to rename the chosen group and to remove the selected groups.
+        """The group list, with buttons to rename the chosen group, and to merge or remove the selected groups.
 
         A group is renamed with F2 or a double click too, and removed with the Delete key.
-        Ctrl and Shift select several groups to remove at once.
+        Ctrl and Shift select several groups to merge or remove at once.
 
         Args:
             parent: The splitter.
@@ -216,15 +232,23 @@ class GroupPage(WorkflowPage):
         self._groups_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._groups_list.currentItemChanged.connect(self._on_group_chosen)
         self._groups_list.itemDoubleClicked.connect(self._rename_chosen_group)
+        self._groups_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        show_group_menu = partial(self.show_group_list_menu, self._groups_list)
+        self._groups_list.customContextMenuRequested.connect(show_group_menu)
         delete_key = QKeySequence(QKeySequence.StandardKey.Delete)
         delete_shortcut = QShortcut(delete_key, self._groups_list)
         delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete_shortcut.activated.connect(self._remove_selected_groups)
         rename_button = self.make_button("Rename group…   (F2)", self._rename_chosen_group)
+        self._merge_button = self.make_button("Merge…", self._merge_selected_groups)
+        self._merge_button.setToolTip("Put the selected groups together into one. Select two or more with Ctrl or Shift.")
+        self._merge_button.setEnabled(False)
+        self._groups_list.itemSelectionChanged.connect(self._refresh_merge_button)
         remove_button = self.make_button("Remove…", self._remove_selected_groups)
         remove_button.setToolTip("Remove the selected groups. Their photos stay in the project but are not exported.")
         buttons = QHBoxLayout()
         buttons.addWidget(rename_button, 1)
+        buttons.addWidget(self._merge_button)
         buttons.addWidget(remove_button)
         layout.addWidget(self._groups_list, 1)
         layout.addLayout(buttons)
@@ -234,6 +258,18 @@ class GroupPage(WorkflowPage):
         """Ask for a new name of the chosen group."""
         group_id = self._chosen_group_id()
         self.ask_group_name(group_id)
+
+    def _merge_selected_groups(self) -> None:
+        """Ask to merge the selected groups."""
+        items = self._groups_list.selectedItems()
+        group_ids = [item.data(Qt.ItemDataRole.UserRole) for item in items]
+        self.ask_to_merge_groups(group_ids)
+
+    def _refresh_merge_button(self) -> None:
+        """Let the Merge button work only while two or more groups are selected."""
+        items = self._groups_list.selectedItems()
+        count = len(items)
+        self._merge_button.setEnabled(count > 1)
 
     def _remove_selected_groups(self) -> None:
         """Ask to remove the selected groups, or the chosen group when none is selected."""
@@ -273,9 +309,45 @@ class GroupPage(WorkflowPage):
         row.addWidget(select_all_button)
         row.addWidget(unselect_all_button)
         self._grid = PhotoGrid(self._model, self._style, column)
+        self._grid.menu_requested.connect(self._show_photo_menu)
         layout.addLayout(row)
         layout.addWidget(self._grid, 1)
         return column
+
+    def _show_photo_menu(self, photo_id: str, position: QPoint) -> None:
+        """Show a photo's right-click menu, with selecting the chosen photos and the group items.
+
+        Args:
+            photo_id: Id of the photo under the mouse.
+            position: Where to show the menu, in screen coordinates.
+        """
+        group_id = self._chosen_group_id()
+        shown_group = group_id or None
+        self.show_photo_menu(self._grid, photo_id, position, self.DECISION_WORDS, shown_group)
+
+    def _on_sample_changed(self, _group_id: str) -> None:
+        """Show the new preview of a group in the list.
+
+        Args:
+            _group_id: Id of the group (all groups are refreshed, which is quick).
+        """
+        self._on_selection_changed()
+
+    def _on_thumbnail_changed(self, photo_id: str) -> None:
+        """Show the new picture of the groups a photo stands for, after darktable developed its preview.
+
+        Args:
+            photo_id: Id of the photo with the new thumbnail.
+        """
+        count = self._groups_list.count()
+        for row in range(count):
+            item = self._groups_list.item(row)
+            group_id = item.data(Qt.ItemDataRole.UserRole)
+            sample = self._controller.sample_photo(group_id)
+            if sample is None or sample.id != photo_id:
+                continue
+            icon = self._group_icon(group_id)
+            item.setIcon(icon)
 
     def _add_shortcuts(self) -> None:
         """K selects and X unselects the chosen photos, as in the Filter step; F2 renames the chosen group."""
@@ -330,28 +402,20 @@ class GroupPage(WorkflowPage):
         gap = round(grouping.max_gap_minutes)
         self._gap.setValue(gap)
         similarity = round(grouping.min_similarity * 100)
-        self._similarity.setValue(similarity)
-        self._show_similarity(similarity)
+        self._similarity_box.setValue(similarity)
         self._on_mode_changed(grouping.by_people)
 
     def _options(self) -> GroupSettings:
-        """The options set in the row.
+        """The options set in the row, with a percentage that is still being typed included.
 
         Returns:
             The grouping options.
         """
         by_people = self._by_people.isChecked()
         gap_minutes = self._gap.value() * 1.0
-        similarity = self._similarity.value() / 100.0
+        self._similarity_box.interpretText()
+        similarity = self._similarity_box.value() / 100.0
         return GroupSettings(by_people, gap_minutes, similarity)
-
-    def _show_similarity(self, value: int) -> None:
-        """Write the similarity next to its slider.
-
-        Args:
-            value: The similarity in percent.
-        """
-        self._similarity_value.setText(f"{value} %")
 
     def _on_mode_changed(self, by_people: bool) -> None:
         """Show the options that belong to the chosen mode.
@@ -359,7 +423,7 @@ class GroupPage(WorkflowPage):
         Args:
             by_people: True when grouping by people.
         """
-        for widget in (self._gap_label, self._gap, self._similarity_label, self._similarity, self._similarity_value):
+        for widget in (self._gap_label, self._gap, self._similarity_label, self._similarity, self._similarity_box):
             widget.setVisible(not by_people)
         self._faces_row.setVisible(by_people)
         self._people_panel.setVisible(by_people)
@@ -499,7 +563,7 @@ class GroupPage(WorkflowPage):
         self._refresh_selection_note()
 
     def _group_icon(self, group_id: str) -> QIcon:
-        """The picture of a group in the list: the sharpest of its selected photos, as in the Refine step.
+        """The picture of a group in the list: its preview, the photo that stands for it in the Refine step.
 
         Args:
             group_id: Id of the group.

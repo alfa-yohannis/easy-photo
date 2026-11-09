@@ -252,6 +252,9 @@ QMenu::item:selected {
     background: $accent_soft;
     color: $text;
 }
+QMenu::item:disabled {
+    color: $muted;
+}
 """
 """The style sheet, with ``$name`` where a theme color goes."""
 

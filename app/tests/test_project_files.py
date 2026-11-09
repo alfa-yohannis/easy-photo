@@ -77,6 +77,10 @@ def test_manifest_keeps_the_users_work(tmp_path: Path) -> None:
     project.set_groups([named_group])
     project.choose("group-1", "words-1")
     project.set_option_used("group-1", "words-2", False)
+    project.choose_sample("group-1", "photo-b")
+    applied = tmp_path / "photos" / "P1000002.RW2.xmp"
+    project.set_photo_edit("photo-b", applied)
+    project.set_applied_at("photo-b", 1234.5)
     saved_name = SavedName("Papa", ("photo-b#0",))
     project.set_saved_names([saved_name])
     manifest.save(project)
@@ -95,6 +99,46 @@ def test_manifest_keeps_the_users_work(tmp_path: Path) -> None:
     assert opened.saved_names() == [saved_name]
     assert opened.option_used_in("group-1", "words-1")
     assert not opened.option_used_in("group-1", "words-2")
+    assert opened.chosen_sample_of("group-1") == "photo-b"
+    assert opened.photo_edit_of("photo-b") == applied
+    assert opened.photo_edit_of("photo-a") is None
+    assert opened.applied_times == {"photo-b": 1234.5}
+
+
+def test_a_chosen_or_edited_photo_stands_for_a_group(tmp_path: Path) -> None:
+    """The photo the user chose comes first, then the latest photo edited in darktable, then the sharpest."""
+    project = Project("Previews", tmp_path)
+    photos = [Photo(tmp_path / f"P100000{number}.RW2", FileKind.RAW) for number in range(3)]
+    project.set_photos(photos)
+    for photo, sharpness in zip(photos, [40.0, 90.0, 60.0]):
+        scores = QualityScores(sharpness, 0.2, 0.8, 0.0)
+        result = QualityResult(scores, ())
+        project.set_quality(photo.id, result)
+    photo_ids = [photo.id for photo in photos]
+    group = PhotoGroup("group-1", "Group 1", photo_ids, photo_ids[0])
+    project.set_groups([group])
+    sharpest = project.sample_of(group)
+    project.set_edited_at(photo_ids[0], 100.0)
+    edited = project.sample_of(group)
+    project.set_edited_at(photo_ids[2], 200.0)
+    latest_edited = project.sample_of(group)
+    project.choose_sample(group.id, photo_ids[1])
+    chosen = project.sample_of(group)
+    project.decide(photo_ids[1], Decision.SET_ASIDE)
+    chosen_but_unselected = project.sample_of(group)
+    project.choose_sample(group.id, None)
+    project.set_edited_at(photo_ids[0], None)
+    project.set_edited_at(photo_ids[2], None)
+    automatic = project.sample_of(group)
+    assert sharpest is photos[1]
+    assert edited is photos[0]
+    assert latest_edited is photos[2]
+    assert chosen is photos[1]
+    assert chosen_but_unselected is photos[2]
+    assert automatic is photos[2]
+    project.choose_sample(group.id, photo_ids[0])
+    project.set_groups([group])
+    assert project.chosen_sample_of(group.id) is None
 
 
 def test_the_sharpest_selected_photo_stands_for_a_group(tmp_path: Path) -> None:

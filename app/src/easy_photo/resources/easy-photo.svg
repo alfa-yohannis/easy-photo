@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- easy-photo app icon: two stacked prints on a blue tile, the front one a landscape, and a sparkle.
+     Plain shapes and gradients only (no filters, masks or clip paths), so every SVG renderer draws it. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>easy-photo</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F8DF7"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7DB8FB"/>
+      <stop offset="1" stop-color="#D6E8FE"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)"/>
+
+  <!-- the print at the back, with its shadow -->
+  <g transform="translate(226 262) rotate(-12)">
+    <rect x="-140" y="-105" width="280" height="230" rx="18" fill="#0B2A7A" fill-opacity="0.25"/>
+    <rect x="-140" y="-115" width="280" height="230" rx="18" fill="#F2F5FA"/>
+    <rect x="-124" y="-99" width="248" height="162" rx="6" fill="#C9D6EA"/>
+  </g>
+
+  <!-- the print at the front: a landscape with the sun -->
+  <g transform="translate(270 300) rotate(5)">
+    <rect x="-140" y="-105" width="280" height="230" rx="18" fill="#0B2A7A" fill-opacity="0.3"/>
+    <rect x="-140" y="-115" width="280" height="230" rx="18" fill="#FFFFFF"/>
+    <rect x="-124" y="-99" width="248" height="162" rx="6" fill="url(#sky)"/>
+    <circle cx="66" cy="-52" r="26" fill="#FBBF24"/>
+    <path d="M -124 63 L -124 18 L -66 -38 L -12 14 L 30 -8 L 124 54 L 124 63 Z" fill="#10B981"/>
+    <path d="M -46 63 L 34 -16 L 124 40 L 124 63 Z" fill="#047857"/>
+  </g>
+
+  <!-- the sparkle: making photos easy -->
+  <path d="M 404 70 Q 404 118 452 118 Q 404 118 404 166 Q 404 118 356 118 Q 404 118 404 70 Z" fill="#FFFFFF"/>
+  <path d="M 452 168 Q 452 186 470 186 Q 452 186 452 204 Q 452 186 434 186 Q 452 186 452 168 Z" fill="#FDE68A"/>
+</svg>

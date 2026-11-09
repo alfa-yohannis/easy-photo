@@ -29,7 +29,7 @@ from easy_photo.wording import count_text
 
 
 class RefinePage(WorkflowPage):
-    """Step 5: the options are shown on each group's sharpest photo, and the user picks one.
+    """Step 5: the options are shown on each group's preview photo, and the user picks one.
 
     When no option fits, the user types the change they want; the app makes
     that version at once and picks it.
@@ -50,8 +50,9 @@ class RefinePage(WorkflowPage):
             controller,
             style,
             "Refine",
-            "Compare the options on the sharpest photo of each group and pick the one you like; it is used for "
-            "every photo of the group. If none fits, describe the change you want below.",
+            "Compare the options on each group's preview photo and pick the one you like; it is used for every "
+            "photo of the group. Right-click a group to open its preview in darktable or apply its sidecar to the "
+            "group. If none fits, describe the change you want below.",
             parent,
         )
         self._group_id = ""
@@ -62,6 +63,9 @@ class RefinePage(WorkflowPage):
         self._groups_list.setWordWrap(True)
         self._groups_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._groups_list.currentItemChanged.connect(self._on_group_chosen)
+        self._groups_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        show_group_menu = partial(self.show_group_list_menu, self._groups_list)
+        self._groups_list.customContextMenuRequested.connect(show_group_menu)
         right = self._make_versions_column(splitter)
         splitter.addWidget(self._groups_list)
         splitter.addWidget(right)
@@ -75,6 +79,8 @@ class RefinePage(WorkflowPage):
         controller.pipelines_changed.connect(self._on_options_changed)
         controller.option_groups_changed.connect(self._on_option_groups_changed)
         controller.words_answered.connect(self._on_words_answered)
+        controller.sample_changed.connect(self._on_option_groups_changed)
+        controller.edits_changed.connect(self._on_edits_changed)
 
     def is_ready(self) -> bool:
         """The user can go on to the export once one group has a pick; the others can wait.
@@ -110,8 +116,9 @@ class RefinePage(WorkflowPage):
         return f"{project.chosen_count} of {count} groups"
 
     def on_shown(self) -> None:
-        """Show the groups and the versions of the chosen group."""
+        """Show the groups and the versions of the chosen group, and look for new darktable edits."""
         self._refresh_groups()
+        self._controller.check_edits()
 
     # ----------------------------------------------------------------- layout
 
@@ -371,6 +378,10 @@ class RefinePage(WorkflowPage):
                 f"Shown on {sample.name}. None of the group's {group.size} photos is selected, "
                 "so the group is not exported."
             )
+        if project.chosen_sample_of(group_id) == sample.id:
+            return f"Shown on {sample.name}, the preview you chose."
+        if project.edited_at(sample.id) is not None:
+            return f"Shown on {sample.name}, which you edited in darktable."
         selected_count = len(selected)
         selected_text = count_text(selected_count, "selected photo")
         return f"Shown on {sample.name}, the sharpest of its {selected_text}."
@@ -447,13 +458,18 @@ class RefinePage(WorkflowPage):
             self._show_group(self._group_id)
 
     def _on_option_groups_changed(self, group_id: str) -> None:
-        """An option was turned on or off for a group: make that group's versions again when it is shown.
+        """A group's options or preview changed: make that group's versions again when it is shown.
 
         Args:
             group_id: Id of the group.
         """
         if group_id == self._group_id and self.isVisible():
             self._show_group(group_id)
+
+    def _on_edits_changed(self) -> None:
+        """Photos were edited in darktable: make the shown group's versions again, on its preview of now."""
+        if self._group_id and self.isVisible():
+            self._show_group(self._group_id)
 
     def _on_words_answered(self, target: str, worked: bool, message: str) -> None:
         """Show how typed words were read, when they were typed for the chosen group.

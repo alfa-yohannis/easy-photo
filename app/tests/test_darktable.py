@@ -7,7 +7,9 @@ computers without darktable.
 from __future__ import annotations
 
 import base64
+import os
 import struct
+import sys
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -20,8 +22,8 @@ from PIL import Image
 from easy_photo.model.photo import FileKind, Photo
 from easy_photo.refinement.pipeline import PipelineSource, RefinementPipeline
 from easy_photo.refinement.steps import ExposureStep, StepCatalog
-from easy_photo.services.darktable import DarktableRenderer
-from easy_photo.services.darktable_edit import DarktableEdit, DarktableEditError
+from easy_photo.services.darktable import DarktableError, DarktableLauncher, DarktableRenderer
+from easy_photo.services.darktable_edit import DarktableEdit, DarktableEditError, EditedPhotos, SidecarWriter
 from easy_photo.services.developer import DevelopError, PhotoDeveloper
 from easy_photo.services.exporter import Exporter, ExportStatus
 from easy_photo.services.photo_finder import PhotoFinder
@@ -374,3 +376,164 @@ def test_pipeline_keeps_its_darktable_edit(tmp_path: Path) -> None:
     assert loaded.darktable_edit == edit_file
     assert loaded.source is PipelineSource.DARKTABLE
     assert loaded.describe_steps() == "darktable edit P1188493.RW2.xmp, Exposure +0.3 EV"
+
+
+def test_developer_keeps_the_whole_edit_of_its_own_photo(tmp_path: Path) -> None:
+    """A photo developed with its own sidecar keeps all of it; another photo gets the cleaned edit."""
+    plain = blend_text(0, False)
+    entries = [("exposure", plain), ("crop", plain)]
+    own_sidecar = write_sidecar(tmp_path, entries, 2, "P1000002.RW2.xmp")
+    renderer = StandInRenderer()
+    reader = make_reader(tmp_path)
+    developer = PhotoDeveloper(reader, renderer)
+    own_path = tmp_path / "P1000002.RW2"
+    other_path = tmp_path / "P1000003.RW2"
+    own_photo = Photo(own_path, FileKind.RAW)
+    other_photo = Photo(other_path, FileKind.RAW)
+    option = edit_option(own_sidecar)
+    developer.develop(own_photo, option, 300, True)
+    developer.develop(other_photo, option, 300, True)
+    own_request = renderer.requests[0]
+    other_request = renderer.requests[1]
+    assert own_request[1] is None
+    assert 'darktable:operation="crop"' not in other_request[1]
+    assert developer.is_own_sidecar(own_photo, own_sidecar)
+    assert not developer.is_own_sidecar(other_photo, own_sidecar)
+
+
+def test_edited_photos_are_told_by_their_sidecars(tmp_path: Path, photo_maker: PhotoMaker) -> None:
+    """A raw file counts as edited while its sidecar holds the user's edit; a changed sidecar is read again."""
+    plain = blend_text(0, False)
+    entries = [("exposure", plain)]
+    edited_hashes = 'darktable:history_auto_hash="aaaa" darktable:history_current_hash="bbbb"'
+    untouched_hashes = 'darktable:history_auto_hash="aaaa" darktable:history_current_hash="aaaa"'
+    raw_path = tmp_path / "P1000004.RW2"
+    raw_path.write_bytes(b"raw")
+    sidecar = write_sidecar(tmp_path, entries, 1, "P1000004.RW2.xmp", edited_hashes)
+    bare_path = tmp_path / "P1000005.RW2"
+    bare_path.write_bytes(b"raw")
+    pixels = photo_maker.scene((0.9, 0.8, 0.7), 1)
+    picture_path = photo_maker.write("P1000006", pixels, MORNING)
+    raw = Photo(raw_path, FileKind.RAW)
+    bare = Photo(bare_path, FileKind.RAW)
+    picture = Photo(picture_path, FileKind.IMAGE)
+    edits = EditedPhotos()
+    edited_at = edits.edited_at(raw)
+    status = sidecar.stat()
+    assert edited_at == status.st_mtime
+    assert edits.edited_at(bare) is None
+    assert edits.edited_at(picture) is None
+    write_sidecar(tmp_path, entries, 1, "P1000004.RW2.xmp", untouched_hashes)
+    later = status.st_mtime + 10
+    os.utime(sidecar, (later, later))
+    assert edits.edited_at(raw) is None
+
+
+def test_launcher_finds_darktable_next_to_darktable_cli(tmp_path: Path) -> None:
+    """darktable is found in the folder of darktable-cli, and gets the photo as its only argument."""
+    darktable_cli = tmp_path / "darktable-cli"
+    darktable_cli.write_bytes(b"")
+    darktable = tmp_path / "darktable"
+    darktable.write_bytes(b"")
+    launcher = DarktableLauncher.locate(darktable_cli)
+    photo = tmp_path / "P1000001.RW2"
+    command = launcher.command_for(photo)
+    darktable_text = str(darktable)
+    photo_text = str(photo)
+    assert launcher.available
+    assert command == [darktable_text, photo_text]
+
+
+def test_launcher_without_darktable_says_so(tmp_path: Path) -> None:
+    """Without darktable, opening a photo fails with a clear message."""
+    launcher = DarktableLauncher(None)
+    photo = tmp_path / "P1000001.RW2"
+    assert not launcher.available
+    with pytest.raises(DarktableError, match="darktable was not found"):
+        launcher.open(photo)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in darktable is a shell script")
+def test_launcher_starts_darktable_with_the_photo(tmp_path: Path) -> None:
+    """darktable is started with the photo, and the app does not wait for it."""
+    darktable = tmp_path / "darktable"
+    opened = tmp_path / "opened.txt"
+    darktable.write_text(f'#!/bin/sh\necho "$@" > "{opened}"\n', encoding="utf-8")
+    darktable.chmod(0o755)
+    launcher = DarktableLauncher(darktable)
+    photo = tmp_path / "P1000001.RW2"
+    process = launcher.open(photo)
+    process.wait(timeout=10)
+    text = opened.read_text(encoding="utf-8")
+    photo_text = str(photo)
+    assert text.strip() == photo_text
+
+
+def test_sidecar_writer_keeps_what_is_not_the_edit(tmp_path: Path) -> None:
+    """The old sidecar's rating and tags stay, its history and hashes go, and a backup is made."""
+    plain = blend_text(0, False)
+    source_entries = [("exposure", plain), ("crop", plain)]
+    source_folder = tmp_path / "source"
+    source_folder.mkdir()
+    source = write_sidecar(source_folder, source_entries, 2)
+    old_text = f"""<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 4.4.0-Exiv2">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:darktable="http://darktable.sf.net/"
+   xmp:Rating="3"
+   darktable:history_end="1"
+   darktable:history_current_hash="aaaa"
+   darktable:history_auto_hash="aaaa">
+   <dc:subject>
+    <rdf:Bag>
+     <rdf:li>Kanazawa</rdf:li>
+    </rdf:Bag>
+   </dc:subject>
+   <darktable:history>
+    <rdf:Seq>
+     <rdf:li darktable:num="0" darktable:operation="colorbalancergb" darktable:enabled="1"
+      darktable:modversion="1" darktable:params="0000803f" darktable:multi_name="" darktable:multi_priority="0"
+      darktable:blendop_version="13" darktable:blendop_params="{plain}"/>
+    </rdf:Seq>
+   </darktable:history>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+"""
+    photo = tmp_path / "P1000009.RW2"
+    photo.write_bytes(b"raw")
+    sidecar = tmp_path / "P1000009.RW2.xmp"
+    sidecar.write_text(old_text, encoding="utf-8")
+    edit = DarktableEdit.read(source)
+    writer = SidecarWriter()
+    backup_folder = tmp_path / "backups"
+    backup = writer.write(edit, photo, backup_folder)
+    new_text = sidecar.read_text(encoding="utf-8")
+    written = DarktableEdit.read(sidecar)
+    assert backup == backup_folder / "P1000009.RW2.xmp"
+    assert backup.read_text(encoding="utf-8") == old_text
+    assert 'xmp:Rating="3"' in new_text
+    assert "<rdf:li>Kanazawa</rdf:li>" in new_text
+    assert "history_current_hash" not in new_text
+    assert "colorbalancergb" not in new_text
+    assert written.operations == ["exposure"]
+    assert written.changed_by_user
+
+
+def test_sidecar_writer_writes_a_new_sidecar(tmp_path: Path) -> None:
+    """A photo without a sidecar gets one with the edit, and no backup is made."""
+    source = typical_edit(tmp_path)
+    photo = tmp_path / "P1000010.RW2"
+    photo.write_bytes(b"raw")
+    edit = DarktableEdit.read(source)
+    writer = SidecarWriter()
+    backup_folder = tmp_path / "backups"
+    backup = writer.write(edit, photo, backup_folder)
+    sidecar = writer.sidecar_of(photo)
+    written = DarktableEdit.read(sidecar)
+    assert backup is None
+    assert not backup_folder.exists()
+    assert written.operations == ["exposure", "colorbalancergb"]

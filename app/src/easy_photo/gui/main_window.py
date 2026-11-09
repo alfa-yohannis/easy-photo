@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths
+from PySide6.QtCore import QEvent, QStandardPaths
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from easy_photo import APP_NAME, APP_VERSION
+from easy_photo import APP_NAME
+from easy_photo.gui.about_dialog import AboutDialog
 from easy_photo.gui.controller import ProjectController
 from easy_photo.gui.dialogs import AiSettingsDialog, NewProjectDialog
 from easy_photo.gui.pages.base_page import WorkflowPage
@@ -35,6 +36,7 @@ from easy_photo.gui.style import AppStyle
 from easy_photo.gui.widgets.step_list import StepList
 from easy_photo.services.ai_words import AiWordsReader
 from easy_photo.services.manifest import ProjectManifest
+from easy_photo.settings import AppFolders
 
 
 class MainWindow(QMainWindow):
@@ -49,17 +51,19 @@ class MainWindow(QMainWindow):
     STEP_TITLES = ("Source", "Filter", "Group", "References", "Refine", "Export")
     NOTICE_MS = 6000
 
-    def __init__(self, controller: ProjectController, style: AppStyle, parent: QWidget | None = None) -> None:
+    def __init__(self, controller: ProjectController, style: AppStyle, folders: AppFolders, parent: QWidget | None = None) -> None:
         """Create the window.
 
         Args:
             controller: Runs the work and holds the project.
             style: Gives the theme colors.
+            folders: Where the app keeps its files, which the About box shows.
             parent: Qt parent widget.
         """
         super().__init__(parent)
         self._controller = controller
         self._style = style
+        self._folders = folders
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 900)
         self.setMinimumSize(1024, 680)
@@ -93,6 +97,16 @@ class MainWindow(QMainWindow):
         page = self._pages[index]
         page.on_shown()
         self._refresh_steps()
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Look for new darktable edits when the window becomes active again, for example after darktable.
+
+        Args:
+            event: The change event.
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._controller.check_edits()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Stop background work and save the project before the window closes.
@@ -394,13 +408,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, APP_NAME, text)
 
     def _show_about(self) -> None:
-        """Show what the app is."""
-        text = (
-            f"<b>{APP_NAME} {APP_VERSION}</b><br><br>"
-            "Filters, groups and refines photos, guided by your own picks, examples from the internet, "
-            "and examples you give.<br><br>MIT License."
-        )
-        QMessageBox.about(self, APP_NAME, text)
+        """Show what the app is, its version, the programs it works with, and its folders."""
+        dialog = AboutDialog(self._controller, self._folders, self)
+        dialog.exec()
 
     # ------------------------------------------------------------- progress
 

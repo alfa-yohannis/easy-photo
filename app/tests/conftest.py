@@ -1,8 +1,10 @@
-"""Shared test setup: Qt runs without a screen, and a helper writes small test photos."""
+"""Shared test setup: Qt runs without a screen, one Qt application serves every test, and a helper writes small test photos."""
 
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import cv2
 import numpy as np
 import pytest
 from PIL import ExifTags, Image
+from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -102,3 +105,36 @@ def photo_maker(tmp_path: Path) -> PhotoMaker:
     """
     folder = tmp_path / "photos"
     return PhotoMaker(folder)
+
+
+@pytest.fixture(scope="session")
+def qt_application() -> QApplication:
+    """The one Qt application of the test run, made by the first test that needs Qt.
+
+    Returns:
+        The application.
+    """
+    existing = QApplication.instance()
+    if existing is not None:
+        return existing
+    return QApplication([])
+
+
+def wait_until(condition: Callable[[], bool], seconds: float = 60.0) -> bool:
+    """Let Qt run until a condition holds or the time is up.
+
+    Args:
+        condition: Checked again and again.
+        seconds: Longest time to wait.
+
+    Returns:
+        True when the condition held in time.
+    """
+    application = QApplication.instance()
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        application.processEvents()
+        if condition():
+            return True
+        time.sleep(0.02)
+    return False

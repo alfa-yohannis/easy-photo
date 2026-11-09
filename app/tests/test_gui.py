@@ -6,44 +6,25 @@ words, picks options, exports, and opens the project again from its manifest.
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QSlider, QSpinBox
 
 from easy_photo.gui.application import EasyPhotoApp
 from easy_photo.gui.controller import ProjectController
+from easy_photo.gui.pages.group_page import GroupPage
 from easy_photo.gui.pages.refine_page import RefinePage
 from easy_photo.model.quality import Decision
 from easy_photo.services.ai_words import AiWordsReader
 from easy_photo.services.manifest import ProjectManifest
 from easy_photo.settings import AppFolders, ExportSettings, GroupSettings
-from tests.conftest import PhotoMaker
+from tests.conftest import PhotoMaker, wait_until
 
 START = datetime(2024, 12, 14, 10, 0, 0)
-
-
-def wait_until(condition: Callable[[], bool], seconds: float = 60.0) -> bool:
-    """Let Qt run until a condition holds or the time is up.
-
-    Args:
-        condition: Checked again and again.
-        seconds: Longest time to wait.
-
-    Returns:
-        True when the condition held in time.
-    """
-    application = QApplication.instance()
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        application.processEvents()
-        if condition():
-            return True
-        time.sleep(0.02)
-    return False
 
 
 def write_test_photos(maker: PhotoMaker) -> None:
@@ -65,11 +46,12 @@ def write_test_photos(maker: PhotoMaker) -> None:
 
 
 @pytest.fixture(scope="module")
-def app(tmp_path_factory: pytest.TempPathFactory) -> EasyPhotoApp:
+def app(tmp_path_factory: pytest.TempPathFactory, qt_application: QApplication) -> EasyPhotoApp:
     """The app with its own settings folder, so the user's real settings are never touched.
 
     Args:
         tmp_path_factory: Makes a temporary folder for the module.
+        qt_application: The Qt application the app runs in.
 
     Returns:
         The app.
@@ -225,3 +207,29 @@ def test_whole_workflow(app: EasyPhotoApp, tmp_path: Path, photo_maker: PhotoMak
     assert not planned_ids & second_photos
     wait_until(lambda: not controller.tasks.is_busy)
     controller.close_project()
+
+
+def test_the_alike_percentage_can_be_typed(tmp_path: Path, qt_application: QApplication) -> None:
+    """Typing a percentage moves the slider, and dragging the slider changes the typed number.
+
+    Args:
+        tmp_path: pytest's temporary folder for the test.
+        qt_application: The Qt application the app runs in.
+    """
+    folders = AppFolders(tmp_path / "app")
+    app = EasyPhotoApp(["easy-photo"], folders)
+    pages = app.window.pages
+    group_pages = [page for page in pages if isinstance(page, GroupPage)]
+    group_page = group_pages[0]
+    spin_boxes = group_page.findChildren(QSpinBox)
+    percent_boxes = [spin_box for spin_box in spin_boxes if spin_box.suffix() == " %"]
+    box = percent_boxes[0]
+    slider = group_page.findChild(QSlider)
+    box.selectAll()
+    QTest.keyClicks(box, "72")
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    typed = slider.value()
+    slider.setValue(40)
+    dragged = box.value()
+    assert typed == 72
+    assert dragged == 40

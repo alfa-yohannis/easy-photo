@@ -10,6 +10,7 @@ import cv2
 from PySide6.QtWidgets import QApplication
 
 from easy_photo import APP_NAME, APP_VERSION
+from easy_photo.gui.app_icon import AppIcon
 from easy_photo.gui.controller import ProjectController
 from easy_photo.gui.main_window import MainWindow
 from easy_photo.gui.style import AppStyle
@@ -41,6 +42,10 @@ class EasyPhotoApp:
         self._qt_app.setApplicationName(APP_NAME)
         self._qt_app.setApplicationDisplayName(APP_NAME)
         self._qt_app.setApplicationVersion(APP_VERSION)
+        # The launcher has the app's name, so the desktop shows its icon for the window and can pin it.
+        self._qt_app.setDesktopFileName(APP_NAME)
+        app_icon = AppIcon.icon()
+        self._qt_app.setWindowIcon(app_icon)
         self._folders = folders if folders is not None else AppFolders()
         self._settings_store = SettingsStore(self._folders.config)
         self._settings = self._settings_store.load()
@@ -48,7 +53,7 @@ class EasyPhotoApp:
         self._style.apply_to(self._qt_app)
         self._services = AppServices.create(self._settings, self._folders)
         self._controller = ProjectController(self._services, self._settings, self._settings_store)
-        self._window = MainWindow(self._controller, self._style)
+        self._window = MainWindow(self._controller, self._style, self._folders)
         self._project_to_open = Path(arguments[1]) if len(arguments) > 1 else None
 
     @property

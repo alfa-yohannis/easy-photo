@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from PySide6.QtGui import QImage
 from easy_photo.gui.background import BackgroundTask, TaskContext, TaskRunner
 from easy_photo.gui.images import ImageConverter
 from easy_photo.model.face import Face
+from easy_photo.model.group import PhotoGroup
 from easy_photo.model.photo import Photo, PhotoInfo
 from easy_photo.model.project import Project
 from easy_photo.model.quality import Decision
@@ -25,10 +27,11 @@ from easy_photo.refinement.pipeline import PipelineSource, RefinementPipeline
 from easy_photo.refinement.steps import ExposureStep, RefinementStep, StepCatalog
 from easy_photo.services.ai_words import AiLoginNeeded, AiReading, AiWordsError, AiWordsReader, LoginStatus
 from easy_photo.services.app_services import AppServices
-from easy_photo.services.darktable_edit import DarktableEdit
+from easy_photo.services.darktable import DarktableError
+from easy_photo.services.darktable_edit import DarktableEdit, DarktableEditError
 from easy_photo.services.exporter import ExportResult, ExportStatus
 from easy_photo.services.faces import FaceFinder, FaceModels
-from easy_photo.services.grouping import FaceGrouper, SimilarityGrouper
+from easy_photo.services.grouping import FaceGrouper, Grouper, SimilarityGrouper
 from easy_photo.services.manifest import ManifestError
 from easy_photo.services.photo_analyzer import PhotoAnalysis, PhotoAnalyzer
 from easy_photo.services.photo_reader import PhotoReadError
@@ -61,7 +64,12 @@ class ScannedPhoto:
     photo_id: str
     info: PhotoInfo
     analysis: PhotoAnalysis
+
     thumbnail: QImage
+    """Made from the camera's preview, or the picture darktable developed, when one is kept for the photo's sidecar."""
+
+    edited_at: float | None
+    """When the user last edited the photo in darktable, or None when they have not."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,31 @@ class UnreadablePhoto:
     scan_number: int
     photo_id: str
     message: str
+
+
+@dataclass(frozen=True)
+class DevelopedPicture:
+    """Sent by the refresh task for every photo darktable developed: the photo's new thumbnail."""
+
+    photo_id: str
+    thumbnail: QImage
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    """What one refresh of previews did."""
+
+    developed: int
+    """Photos that got their picture."""
+
+    total: int
+    """Photos the refresh was for."""
+
+    problems: list[str]
+    """Why photos could not be developed, one message per photo."""
+
+    stopped: bool
+    """True when the user stopped the refresh before the end."""
 
 
 @dataclass(frozen=True)
@@ -84,6 +117,17 @@ class VersionPreview:
 
     sample_id: str
     """Id of the photo the version was made on."""
+
+
+@dataclass(frozen=True)
+class EditSource:
+    """A darktable edit the user can apply: a group's preview, or a photo they edited in darktable."""
+
+    label: str
+    """Text for the menu, such as "Group 2  (P1209499.RW2)"."""
+
+    path: Path
+    """The raw file whose sidecar holds the edit."""
 
 
 @dataclass(frozen=True)
@@ -111,6 +155,9 @@ class ProjectController(QObject):
     VARIANT_STOPS = 0.3
     """How much brighter or darker the extra options of the Refine step are, in stops."""
 
+    BACKUP_FOLDER_NAME = "sidecar backups"
+    """Folder in the project folder where "Apply sidecar" keeps the old sidecars it replaced."""
+
     REFERENCES_TARGET = "references"
     """Where typed words came from when they were typed in the References step (otherwise a group id)."""
 
@@ -127,6 +174,15 @@ class ProjectController(QObject):
     ai_changed = Signal()
     option_groups_changed = Signal(str)
     """An option was turned on or off for the group with this id."""
+
+    sample_changed = Signal(str)
+    """The user chose another photo to stand for the group with this id (its preview), or went back to the sharpest."""
+
+    edits_changed = Signal()
+    """Photos were edited in darktable since the last look; previews may change, and versions are made again."""
+
+    thumbnail_changed = Signal(str)
+    """The photo with this id got a new thumbnail, developed by darktable with its sidecar."""
 
     project_opened = Signal()
     project_closed = Signal()
@@ -177,6 +233,7 @@ class ProjectController(QObject):
         self._reserved_ids: set[str] = set()
         self._scan_number = 0
         self._scan_task: BackgroundTask | None = None
+        self._checking_edits = False
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(self.SAVE_DELAY_MS)
@@ -225,6 +282,16 @@ class ProjectController(QObject):
     def darktable_available(self) -> bool:
         """True when darktable-cli was found."""
         return self._services.darktable.available
+
+    @property
+    def can_open_in_darktable(self) -> bool:
+        """True when darktable itself, the program with the window, was found."""
+        return self._services.darktable_launcher.available
+
+    @property
+    def can_refresh_previews(self) -> bool:
+        """True when darktable-cli was found, so the previews of raw photos can show their darktable edits."""
+        return self._services.thumbnails.available
 
     @property
     def search_service_name(self) -> str:
@@ -534,6 +601,46 @@ class ProjectController(QObject):
         groups_text = count_text(count, "group")
         self.notice.emit(f"Removed {groups_text}. Their photos are not exported until you make groups again.")
 
+    def merge_groups(self, group_ids: Sequence[str]) -> None:
+        """Put several groups together into one, which keeps the place, the id and the name of the first.
+
+        The first is the group that comes first in the group list. The merged
+        group holds the photos of all the groups, in time order. It keeps the
+        first group's pick and chosen preview; when that group has none, the
+        next group that has one gives its own. The references any of the
+        groups used, and the versions typed for any of them, stay with it.
+
+        Args:
+            group_ids: Ids of the groups; nothing happens with fewer than two known groups.
+        """
+        project = self._project
+        if project is None:
+            return
+        chosen = set(group_ids)
+        groups = [group for group in project.groups if group.id in chosen]
+        if len(groups) < 2:
+            return
+        first = groups[0]
+        others = groups[1:]
+        merged = self._merged_group(groups)
+        other_ids = [group.id for group in others]
+        project.merge_groups(merged, other_ids)
+        for group in groups:
+            self._versions.pop(group.id, None)
+        # Versions being made for these groups show the groups as they were.
+        outdated = self._rendering & chosen
+        self._outdated_renders.update(outdated)
+        details = {"into": first.id, "groups": other_ids}
+        self._services.history_log.record("merge groups", details)
+        self.groups_changed.emit()
+        self.choices_changed.emit()
+        self.option_groups_changed.emit(first.id)
+        self._changed()
+        group_count = len(groups)
+        groups_text = count_text(group_count, "group")
+        photos_text = count_text(merged.size, "photo")
+        self.notice.emit(f"Merged {groups_text} into {first.title}, which now holds {photos_text}.")
+
     def rename_group(self, group_id: str, title: str) -> None:
         """Give a group a name of the user's own. Its picks and references stay.
 
@@ -817,7 +924,8 @@ class ProjectController(QObject):
         sample = project.sample_of(group)
         if sample is None:
             return
-        options = self.options_for(group_id)
+        group_options = self.options_for(group_id)
+        options = [self._option_for_photo(sample, option) for option in group_options]
         faces = project.faces_of(sample.id)
         self._rendering.add(group_id)
         sharpen = project.export.sharpen
@@ -917,6 +1025,364 @@ class ProjectController(QObject):
         self.choices_changed.emit()
         self._changed()
 
+    # ------------------------------------------------- darktable and previews
+
+    def open_in_darktable(self, photo_id: str) -> None:
+        """Open a photo in darktable, where the user can edit it.
+
+        darktable writes the edit into the photo's sidecar file. The app reads
+        it from there: the photo is developed with it, and "Apply sidecar to
+        the group" gives it to the other photos of its group.
+
+        Args:
+            photo_id: Id of the photo.
+        """
+        project = self._project
+        photo = project.photo(photo_id) if project is not None else None
+        if photo is None:
+            return
+        try:
+            self._services.darktable_launcher.open(photo.path)
+        except DarktableError as error:
+            message = str(error)
+            self.problem.emit(message)
+            return
+        self.notice.emit(f"Opening {photo.name} in darktable.")
+
+    def choose_sample(self, group_id: str, photo_id: str | None) -> None:
+        """Let a photo stand for its group (the group's preview), or go back to the sharpest selected photo.
+
+        The preview is the photo the Refine step shows the options on, the
+        picture of the group in the group lists, and the photo the group's
+        right-click menu opens and takes the sidecar from.
+
+        Args:
+            group_id: Id of the group.
+            photo_id: Id of a photo of the group, or None for the sharpest selected photo.
+        """
+        project = self._project
+        group = project.group(group_id) if project is not None else None
+        if group is None:
+            return
+        if photo_id is not None and not group.contains(photo_id):
+            return
+        project.choose_sample(group_id, photo_id)
+        details = {"group": group_id, "photo": photo_id}
+        self._services.history_log.record("preview", details)
+        self.sample_changed.emit(group_id)
+        self._changed()
+
+    def refresh_problem(self, photo_ids: Sequence[str]) -> str:
+        """Say why the previews of some photos cannot be refreshed, if they cannot.
+
+        Args:
+            photo_ids: Ids of the photos.
+
+        Returns:
+            A short reason, such as "not a raw file"; empty when at least one
+            of the photos can be refreshed.
+        """
+        if not self.can_refresh_previews:
+            return "darktable-cli not found"
+        raws = self._raw_photos(photo_ids)
+        if raws:
+            return ""
+        if len(photo_ids) == 1:
+            return "not a raw file"
+        return "no raw files"
+
+    def raw_count(self, photo_ids: Sequence[str]) -> int:
+        """How many of some photos are raw files, the photos whose previews a refresh develops.
+
+        Args:
+            photo_ids: Ids of the photos.
+
+        Returns:
+            The number of raw files among them.
+        """
+        raws = self._raw_photos(photo_ids)
+        return len(raws)
+
+    def refresh_previews(self, photo_ids: Sequence[str]) -> None:
+        """Develop the previews of some photos again with darktable, so they show their sidecars' edits.
+
+        A raw photo's thumbnail is first made from the preview the camera
+        stores in the file, which knows nothing of darktable. A refresh
+        develops each raw photo with its own sidecar, in the background, and
+        shows the picture in the photo grids and the group lists. The
+        pictures are kept in the cache folder: a photo whose sidecar did not
+        change since its last refresh gets its picture at once, also when the
+        project opens again. Other image files already show what they hold,
+        so they are left out.
+
+        Args:
+            photo_ids: Ids of the photos, in the order to develop them.
+        """
+        self._start_refresh(photo_ids, True)
+
+    def refresh_group_previews(self, group_ids: Sequence[str]) -> None:
+        """Refresh the previews of every photo of some groups, the photos that stand for the groups first.
+
+        Args:
+            group_ids: Ids of the groups.
+        """
+        photo_ids = self._preview_ids(group_ids)
+        others = self.photos_of_groups(group_ids)
+        photo_ids.extend(others)
+        self._start_refresh(photo_ids, True)
+
+    def check_edits(self) -> None:
+        """Look again, in the background, for photos the user edited in darktable since the last look.
+
+        The window asks for this when it becomes active again, for example
+        after the user edited a photo in darktable, and the Group and Refine
+        steps ask when they open. Only the sidecars' file times are checked;
+        a sidecar is read again only when it changed. A photo the user edited
+        stands for its group, unless the user chose another photo, and its
+        preview is developed again so it shows the new edit.
+        """
+        project = self._project
+        if project is None or self._checking_edits or self._scan_task is not None:
+            return
+        photos = [photo for photo in project.photos if photo.is_raw]
+        if not photos:
+            return
+        self._checking_edits = True
+        job = partial(self._edits_job, photos)
+        self._tasks.start("Looking for darktable edits", job, self._on_edits_checked, self._on_edits_check_failed, quiet=True)
+
+    def edit_problem(self, photo_id: str) -> str:
+        """Say why a photo's sidecar cannot be applied to other photos or groups, if it cannot.
+
+        Args:
+            photo_id: Id of the photo.
+
+        Returns:
+            A short reason, such as "no darktable edit yet"; empty when the sidecar can be applied.
+        """
+        project = self._project
+        photo = project.photo(photo_id) if project is not None else None
+        if photo is None:
+            return "photo not found"
+        if not photo.is_raw:
+            return "not a raw file"
+        edit_file = DarktableEdit.edit_file_for(photo.path)
+        if edit_file is None:
+            return "no darktable edit yet"
+        return ""
+
+    def apply_edit_to_groups(self, source: Path, group_ids: Sequence[str]) -> None:
+        """Apply a darktable edit to every photo of some groups (group to group, image to group).
+
+        The edit is written into the sidecar of each raw photo of the groups,
+        as darktable's paste of a history does, so darktable opens the photos
+        with the edit as a starting point. Each old sidecar is copied to the
+        project's backup folder first. A group whose pick carries another
+        darktable edit, or that has no pick yet, gets the unchanged option, so
+        its photos are exported with their sidecars. The photo the edit comes
+        from keeps its sidecar as it is. Afterwards the groups' previews are
+        developed with their new sidecars, so the group lists show the edit.
+
+        Args:
+            source: An XMP sidecar file, or a raw file whose sidecar holds the user's own edit.
+            group_ids: Ids of the groups.
+        """
+        project = self._project
+        if project is None:
+            return
+        groups = [project.group(group_id) for group_id in group_ids]
+        targets = [group for group in groups if group is not None]
+        edit = self._read_edit(source)
+        if edit is None or not targets:
+            return
+        photo_ids: list[str] = []
+        for group in targets:
+            photo_ids.extend(group.photo_ids)
+        written, backup_folder = self._write_sidecars(edit, photo_ids)
+        if not written:
+            return
+        for group in targets:
+            self._use_sidecars(group.id)
+        group_ids_done = [group.id for group in targets]
+        edit_text = str(edit.path)
+        details = {"groups": group_ids_done, "photos": written, "sidecar": edit_text}
+        self._services.history_log.record("apply sidecar to groups", details)
+        self._sidecars_written(written)
+        # The pictures of the groups show the edit at once; "Refresh previews" does all their photos.
+        preview_ids = self._preview_ids(group_ids_done)
+        self._start_refresh(preview_ids, False)
+        if len(targets) == 1:
+            target_text = targets[0].title
+        else:
+            group_count = len(targets)
+            target_text = count_text(group_count, "group")
+        written_count = len(written)
+        photos_text = count_text(written_count, "photo")
+        backup = self._backup_text(backup_folder)
+        self.notice.emit(f"Wrote the edit of {edit.path.name} into {photos_text} of {target_text}.{backup}")
+
+    def apply_edit_to_photos(self, source: Path, photo_ids: Sequence[str]) -> None:
+        """Apply a darktable edit to single photos (group to image, image to image).
+
+        The edit is written into each photo's sidecar, as darktable's paste of
+        a history does, so darktable opens the photo with the edit as a
+        starting point; the old sidecar is copied to the project's backup
+        folder first. The photo then keeps its own sidecar in the app too,
+        even when its group picks another darktable edit; the pick's other
+        steps still apply. Only raw files take a darktable edit. Afterwards
+        the photos' previews are developed with their new sidecars.
+
+        Args:
+            source: An XMP sidecar file, or a raw file whose sidecar holds the user's own edit.
+            photo_ids: Ids of the photos.
+        """
+        project = self._project
+        if project is None:
+            return
+        edit = self._read_edit(source)
+        if edit is None:
+            return
+        written, backup_folder = self._write_sidecars(edit, photo_ids)
+        if not written:
+            return
+        writer = self._services.sidecars
+        for photo_id in written:
+            photo = project.photo(photo_id)
+            sidecar = writer.sidecar_of(photo.path)
+            project.set_photo_edit(photo_id, sidecar)
+        edit_text = str(edit.path)
+        details = {"photos": written, "sidecar": edit_text}
+        self._services.history_log.record("apply sidecar to photos", details)
+        self._sidecars_written(written)
+        self._start_refresh(written, False)
+        if len(written) == 1:
+            first = project.photo(written[0])
+            target_text = first.name
+        else:
+            written_count = len(written)
+            target_text = count_text(written_count, "photo")
+        backup = self._backup_text(backup_folder)
+        self.notice.emit(f"Wrote the edit of {edit.path.name} into {target_text}.{backup}")
+
+    def remove_photo_edits(self, photo_ids: Sequence[str]) -> None:
+        """Let photos follow their group's pick again, after a sidecar was applied to them alone.
+
+        Their sidecar files stay as they are; they count whenever the group's
+        pick carries no darktable edit of its own.
+
+        Args:
+            photo_ids: Ids of the photos.
+        """
+        project = self._project
+        if project is None:
+            return
+        removed = [photo_id for photo_id in photo_ids if project.photo_edit_of(photo_id) is not None]
+        for photo_id in removed:
+            project.set_photo_edit(photo_id, None)
+        if not removed:
+            return
+        details = {"photos": removed}
+        self._services.history_log.record("follow the group's pick", details)
+        self._sidecars_written(removed, False)
+        removed_count = len(removed)
+        photos_text = count_text(removed_count, "photo")
+        self.notice.emit(f"{photos_text} follow their group's pick again.")
+
+    def photos_of_groups(self, group_ids: Sequence[str]) -> list[str]:
+        """The photos of some groups.
+
+        Args:
+            group_ids: Ids of the groups.
+
+        Returns:
+            Ids of their photos, group by group.
+        """
+        project = self._project
+        photo_ids: list[str] = []
+        if project is None:
+            return photo_ids
+        for group_id in group_ids:
+            group = project.group(group_id)
+            if group is not None:
+                photo_ids.extend(group.photo_ids)
+        return photo_ids
+
+    def own_edit_names(self, photo_ids: Sequence[str], source: Path) -> list[str]:
+        """The photos among some that hold a darktable edit the user made, which applying an edit would replace.
+
+        Args:
+            photo_ids: Ids of the photos.
+            source: The file the edit comes from; its own photo is left out.
+
+        Returns:
+            The names of those photos.
+        """
+        project = self._project
+        names: list[str] = []
+        if project is None:
+            return names
+        source_sidecar = self._sidecar_of_source(source)
+        for photo_id in photo_ids:
+            photo = project.photo(photo_id)
+            if photo is None or not project.edited_by_user(photo_id):
+                continue
+            sidecar = self._services.sidecars.sidecar_of(photo.path)
+            if self._same_file(sidecar, source_sidecar):
+                continue
+            names.append(photo.name)
+        return names
+
+    def group_edit_sources(self, except_ids: Sequence[str] = ()) -> list[EditSource]:
+        """The groups whose preview holds the user's own darktable edit, as sources to apply.
+
+        Args:
+            except_ids: Ids of groups to leave out, such as the group the edit would go to.
+
+        Returns:
+            One source per group, in the order of the groups; its file is the preview's raw file.
+        """
+        project = self._project
+        if project is None:
+            return []
+        sources: list[EditSource] = []
+        for group in project.groups:
+            if group.id in except_ids:
+                continue
+            sample = project.sample_of(group)
+            if sample is None or project.edited_at(sample.id) is None:
+                continue
+            label = f"{group.title}  ({sample.name})"
+            source = EditSource(label, sample.path)
+            sources.append(source)
+        return sources
+
+    def photo_edit_sources(self, except_ids: Sequence[str] = (), limit: int = 20) -> list[EditSource]:
+        """The photos the user edited in darktable themselves, as sources to apply, the latest edit first.
+
+        Args:
+            except_ids: Ids of photos to leave out, such as the photo the edit would go to.
+            limit: Most sources to give; older edits can be chosen as files.
+
+        Returns:
+            One source per photo; its label names the photo's group.
+        """
+        project = self._project
+        if project is None:
+            return []
+        edited = [photo for photo in project.photos if project.edited_by_user(photo.id)]
+        edited.sort(key=self._edit_time_of, reverse=True)
+        sources: list[EditSource] = []
+        for photo in edited:
+            if photo.id in except_ids:
+                continue
+            group_title = self._group_title_of(photo.id)
+            label = f"{photo.name}  ({group_title})"
+            source = EditSource(label, photo.path)
+            sources.append(source)
+            if len(sources) >= limit:
+                break
+        return sources
+
     # ----------------------------------------------------------------- export
 
     def export_plan(self) -> ExportPlan:
@@ -949,7 +1415,8 @@ class ProjectController(QObject):
                 decision = project.decision_of(photo_id)
                 if photo is None or decision is None or not decision.is_kept:
                     continue
-                items.append((photo, pipeline))
+                photo_option = self._option_for_photo(photo, pipeline)
+                items.append((photo, photo_option))
         return ExportPlan(items, skipped, unpicked)
 
     def export(self, settings: ExportSettings) -> None:
@@ -967,24 +1434,118 @@ class ProjectController(QObject):
         if not plan.items:
             self.problem.emit("There is nothing to export yet. Pick an option for at least one group in the Refine step.")
             return
-        default_folder = str(project.default_export_folder)
-        folder_text = settings.output_folder or default_folder
-        run_settings = ExportSettings(
-            folder_text,
-            settings.long_side,
-            settings.quality,
-            settings.copy_metadata,
-            settings.sharpen,
-            settings.overwrite,
-        )
-        faces = {photo.id: project.faces_of(photo.id) for photo, _pipeline in plan.items}
-        job = partial(self._export_job, plan.items, faces, run_settings)
-        self._tasks.start("Exporting photos", job, self._on_export_finished, self._on_task_failed)
+        self._start_export(plan.items)
+
+    @property
+    def export_folder(self) -> Path:
+        """The folder exports go to: the one set in the Export step, or the project's own export folder."""
+        project = self._project
+        if project is None:
+            return Path()
+        folder_text = project.export.output_folder
+        if folder_text:
+            return Path(folder_text)
+        return project.default_export_folder
+
+    def is_skipped(self, group_id: str) -> bool:
+        """Tell whether the user skipped a group in the Refine step, which leaves it out of exports.
+
+        Args:
+            group_id: Id of the group.
+
+        Returns:
+            True when the group is skipped.
+        """
+        project = self._project
+        choice = project.choice_of(group_id) if project is not None else None
+        return choice is not None and choice.pipeline_id is None
+
+    def group_of_photo(self, photo_id: str) -> PhotoGroup | None:
+        """The group a photo is in.
+
+        Args:
+            photo_id: Id of the photo.
+
+        Returns:
+            The group, or None when the photo is in no group.
+        """
+        project = self._project
+        if project is None:
+            return None
+        for group in project.groups:
+            if group.contains(photo_id):
+                return group
+        return None
+
+    def export_groups(self, group_ids: Sequence[str]) -> None:
+        """Export the selected photos of some groups, with the settings of the Export step.
+
+        Each photo gets its group's pick, as in the Export step. A group
+        without a pick yet is exported unchanged: raw files as darktable
+        develops them with their own sidecars, other files as they are. A
+        skipped group is left out.
+
+        Args:
+            group_ids: Ids of the groups.
+        """
+        project = self._project
+        if project is None:
+            return
+        items: list[tuple[Photo, RefinementPipeline]] = []
+        skipped = 0
+        for group_id in group_ids:
+            group = project.group(group_id)
+            if group is None:
+                continue
+            if self.is_skipped(group_id):
+                skipped += 1
+                continue
+            option = self._export_option_of(group_id)
+            photos = project.selected_photos_of(group)
+            for photo in photos:
+                photo_option = self._option_for_photo(photo, option)
+                items.append((photo, photo_option))
+        skipped_text = count_text(skipped, "skipped group")
+        if not items:
+            if skipped:
+                self.problem.emit(
+                    f"Nothing was exported: {skipped_text} left out. Pick an option for a group in the Refine step to export it."
+                )
+            else:
+                self.problem.emit("Nothing was exported: no photo of these groups is selected.")
+            return
+        self._start_export(items)
+        if skipped:
+            self.notice.emit(f"Left out of the export: {skipped_text}.")
+
+    def export_photos(self, photo_ids: Sequence[str]) -> None:
+        """Export single photos, with the settings of the Export step, whether or not they are selected.
+
+        Each photo gets its group's pick. A photo whose group has no pick, or
+        is skipped, and a photo in no group, are exported unchanged.
+
+        Args:
+            photo_ids: Ids of the photos.
+        """
+        project = self._project
+        if project is None:
+            return
+        items: list[tuple[Photo, RefinementPipeline]] = []
+        for photo_id in photo_ids:
+            photo = project.photo(photo_id)
+            if photo is None:
+                continue
+            group = self.group_of_photo(photo_id)
+            option = RefinementPipeline.camera() if group is None else self._export_option_of(group.id)
+            photo_option = self._option_for_photo(photo, option)
+            items.append((photo, photo_option))
+        if items:
+            self._start_export(items)
 
     # ----------------------------------------------------------------- images
 
     def thumbnail(self, photo_id: str) -> QImage | None:
-        """The thumbnail of a photo.
+        """The thumbnail of a photo: made from the camera's preview, or developed by darktable after a refresh.
 
         Args:
             photo_id: Id of the photo.
@@ -1110,8 +1671,12 @@ class ProjectController(QObject):
             message = str(error)
             return UnreadablePhoto(scan_number, photo.id, message)
         analysis = self._services.analyzer.analyze(data.pixels)
-        thumbnail = self._converter.to_qimage(analysis.thumbnail)
-        return ScannedPhoto(scan_number, photo.id, data.info, analysis, thumbnail)
+        picture = self._services.thumbnails.kept(photo)
+        if picture is None:
+            picture = analysis.thumbnail
+        thumbnail = self._converter.to_qimage(picture)
+        edited_at = self._services.edits.edited_at(photo)
+        return ScannedPhoto(scan_number, photo.id, data.info, analysis, thumbnail, edited_at)
 
     def _on_scan_item(self, item: object) -> None:
         """Store one partial result of the scan in the project.
@@ -1136,6 +1701,7 @@ class ProjectController(QObject):
         photo.info = item.info
         result = self._checker.evaluate(item.analysis.scores)
         project.set_analysis(item.photo_id, result, item.analysis.summary)
+        project.set_edited_at(item.photo_id, item.edited_at)
         self._thumbnails[item.photo_id] = item.thumbnail
         self.photo_updated.emit(item.photo_id)
 
@@ -1173,6 +1739,403 @@ class ProjectController(QObject):
         user_decision = decision.value if decision is not None else "automatic"
         details = {"photo": photo_id, "user": user_decision, "app": app_decision}
         self._services.history_log.record("decision", details)
+
+    # ------------------------------------------------ private: darktable edits
+
+    def _edits_job(self, photos: Sequence[Photo], context: TaskContext) -> dict[str, float | None]:
+        """Find out which photos the user edited in darktable, and when. Runs on a worker thread.
+
+        Args:
+            photos: The raw photos of the project.
+            context: Not used; the look is quick.
+
+        Returns:
+            For each photo id, when the user last edited the photo, or None.
+        """
+        found: dict[str, float | None] = {}
+        for photo in photos:
+            found[photo.id] = self._services.edits.edited_at(photo)
+        return found
+
+    def _on_edits_checked(self, found: dict[str, float | None]) -> None:
+        """Store the darktable edits found, and make the versions again when edits changed.
+
+        Args:
+            found: For each photo id, when the user last edited the photo, or None.
+        """
+        self._checking_edits = False
+        project = self._project
+        if project is None:
+            return
+        changed: list[str] = []
+        changed_ids: list[str] = []
+        for photo_id, edited_at in found.items():
+            photo = project.photo(photo_id)
+            if photo is None or project.edited_at(photo_id) == edited_at:
+                continue
+            project.set_edited_at(photo_id, edited_at)
+            changed.append(photo.name)
+            changed_ids.append(photo_id)
+        if not changed:
+            return
+        # The versions show the old edits; the shown group's versions are made again.
+        self._versions.clear()
+        self._outdated_renders.update(self._rendering)
+        self.edits_changed.emit()
+        # The edited photos' previews are developed again, so they show the new edits.
+        self._start_refresh(changed_ids, False)
+        changed_count = len(changed)
+        if changed_count == 1:
+            self.notice.emit(f"Noticed a new darktable edit of {changed[0]}.")
+            return
+        photos_text = count_text(changed_count, "photo")
+        self.notice.emit(f"Noticed new darktable edits of {photos_text}.")
+
+    def _on_edits_check_failed(self, message: str) -> None:
+        """Let the next look for darktable edits start; a failed look is not worth a message.
+
+        Args:
+            message: Why the look failed (not shown).
+        """
+        self._checking_edits = False
+
+    # ------------------------------------------------------- private: sidecars
+
+    def _option_for_photo(self, photo: Photo, option: RefinementPipeline) -> RefinementPipeline:
+        """The option as it applies to one photo: with the photo's own sidecar when a sidecar was applied to it alone.
+
+        Args:
+            photo: The photo.
+            option: The option its group picks, or one of the group's options.
+
+        Returns:
+            The option, or a copy of it with the photo's own edit in place of the option's darktable edit.
+        """
+        edit_file = self._project.photo_edit_of(photo.id)
+        if edit_file is None:
+            return option
+        return option.with_darktable_edit(edit_file)
+
+    def _read_edit(self, source: Path) -> DarktableEdit | None:
+        """Read the darktable edit to apply, or say why it cannot be applied.
+
+        Args:
+            source: An XMP sidecar file, or a raw file whose sidecar holds the user's own edit.
+
+        Returns:
+            The edit, or None after a problem was shown.
+        """
+        edit_file = DarktableEdit.edit_file_for(source)
+        if edit_file is None:
+            self.problem.emit(f"{source.name} holds no darktable edit of your own yet. Edit it in darktable first.")
+            return None
+        try:
+            return DarktableEdit.read(edit_file)
+        except DarktableEditError as error:
+            message = str(error)
+            self.problem.emit(message)
+            return None
+
+    def _write_sidecars(self, edit: DarktableEdit, photo_ids: Sequence[str]) -> tuple[list[str], Path | None]:
+        """Write an edit into the sidecars of some photos, after copying their old sidecars to a backup folder.
+
+        Photos that are not raw files, and the photo the edit belongs to, are left out.
+
+        Args:
+            edit: The edit.
+            photo_ids: Ids of the photos.
+
+        Returns:
+            Ids of the photos whose sidecar was written, and the backup folder
+            when an old sidecar was copied there (otherwise None).
+        """
+        project = self._project
+        writer = self._services.sidecars
+        backup_folder = self._new_backup_folder()
+        written: list[str] = []
+        backed_up = False
+        for photo_id in photo_ids:
+            photo = project.photo(photo_id)
+            if photo is None or not photo.is_raw:
+                continue
+            sidecar = writer.sidecar_of(photo.path)
+            if self._same_file(sidecar, edit.path):
+                continue
+            try:
+                backup = writer.write(edit, photo.path, backup_folder)
+            except OSError as error:
+                self.problem.emit(f"The sidecar of {photo.name} could not be written: {error}")
+                break
+            if backup is not None:
+                backed_up = True
+            written.append(photo_id)
+        if not written:
+            self.notice.emit("No sidecar was written: there is no other raw photo to write the edit into.")
+        used_folder = backup_folder if backed_up else None
+        return written, used_folder
+
+    def _new_backup_folder(self) -> Path:
+        """A new folder, named after the time, for the old sidecars of one "Apply sidecar".
+
+        Returns:
+            The folder, inside the project folder; it is made when the first sidecar is copied.
+        """
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d %H-%M-%S")
+        return self._project.folder / self.BACKUP_FOLDER_NAME / stamp
+
+    def _backup_text(self, backup_folder: Path | None) -> str:
+        """The sentence that says where the old sidecars went.
+
+        Args:
+            backup_folder: The backup folder, or None when no old sidecar was copied.
+
+        Returns:
+            The sentence, with a space before it; empty without a backup.
+        """
+        if backup_folder is None:
+            return ""
+        return f" The old sidecars are in {backup_folder}."
+
+    def _use_sidecars(self, group_id: str) -> None:
+        """Let a group's photos be exported with their own sidecars, after an edit was written into them.
+
+        A group without a pick, or whose pick carries another darktable edit,
+        gets the unchanged option. A skipped group stays skipped, and a pick
+        without a darktable edit stays, since it develops the photos with
+        their sidecars already.
+
+        Args:
+            group_id: Id of the group.
+        """
+        project = self._project
+        choice = project.choice_of(group_id)
+        if choice is not None and choice.pipeline_id is None:
+            return
+        if choice is not None:
+            option = project.pipeline(choice.pipeline_id)
+            if option is not None and option.darktable_edit is None:
+                return
+        self.choose(group_id, RefinementPipeline.CAMERA_ID)
+
+    def _sidecars_written(self, photo_ids: Sequence[str], written: bool = True) -> None:
+        """Bring the app up to date after photos' sidecars, or the edits applied to them alone, changed.
+
+        Args:
+            photo_ids: Ids of the photos.
+            written: True when the app wrote the photos' sidecars; their edits
+                then do not count as edits the user made in darktable.
+        """
+        project = self._project
+        edits = self._services.edits
+        for photo_id in photo_ids:
+            photo = project.photo(photo_id)
+            if photo is None:
+                continue
+            edited_at = edits.edited_at(photo)
+            project.set_edited_at(photo_id, edited_at)
+            if written:
+                project.set_applied_at(photo_id, edited_at)
+            self.photo_updated.emit(photo_id)
+        # The versions show the old development; the shown group's versions are made again.
+        self._versions.clear()
+        self._outdated_renders.update(self._rendering)
+        self.edits_changed.emit()
+        self._changed()
+
+    def _sidecar_of_source(self, source: Path) -> Path | None:
+        """The sidecar file an edit is read from.
+
+        Args:
+            source: An XMP sidecar file, or a raw file.
+
+        Returns:
+            The XMP file, or None when the source holds no edit of the user's own.
+        """
+        return DarktableEdit.edit_file_for(source)
+
+    def _same_file(self, first: Path | None, second: Path | None) -> bool:
+        """Tell whether two paths name the same file, also through a link.
+
+        Args:
+            first: A path, or None.
+            second: Another path, or None.
+
+        Returns:
+            True when both are given and lead to the same file.
+        """
+        if first is None or second is None:
+            return False
+        first_path = first.resolve()
+        second_path = second.resolve()
+        return first_path == second_path
+
+    def _edit_time_of(self, photo: Photo) -> float:
+        """Sort key: when the user last edited a photo in darktable.
+
+        Args:
+            photo: The photo.
+
+        Returns:
+            The time of its sidecar, or 0 when the user has not edited it.
+        """
+        edited_at = self._project.edited_at(photo.id)
+        if edited_at is None:
+            return 0.0
+        return edited_at
+
+    def _group_title_of(self, photo_id: str) -> str:
+        """The title of the group a photo is in.
+
+        Args:
+            photo_id: Id of the photo.
+
+        Returns:
+            The title, or "no group".
+        """
+        group = self.group_of_photo(photo_id)
+        if group is None:
+            return "no group"
+        return group.title
+
+    # ------------------------------------------- private: refreshing previews
+
+    def _start_refresh(self, photo_ids: Sequence[str], asked: bool) -> None:
+        """Start developing the previews of some photos with darktable, in the background.
+
+        Args:
+            photo_ids: Ids of the photos, in the order to develop them; photos
+                that are not raw files are left out.
+            asked: True when the user asked, so the end is announced. A
+                refresh the app starts by itself, after a sidecar changed,
+                only tells about photos it could not develop.
+        """
+        if self._project is None:
+            return
+        if not self.can_refresh_previews:
+            if asked:
+                self.problem.emit(
+                    "darktable-cli was not found, so the previews cannot show darktable edits. "
+                    "Install darktable to refresh them."
+                )
+            return
+        photos = self._raw_photos(photo_ids)
+        if not photos:
+            if asked:
+                self.notice.emit("Only raw files have previews to refresh; other photos already show what the files hold.")
+            return
+        job = partial(self._refresh_job, photos)
+        finished = partial(self._on_previews_refreshed, asked)
+        self._tasks.start("Refreshing previews", job, finished, self._on_task_failed, self._on_picture_developed)
+
+    def _raw_photos(self, photo_ids: Sequence[str]) -> list[Photo]:
+        """The raw files among some photos, each once, in the order given.
+
+        Args:
+            photo_ids: Ids of the photos.
+
+        Returns:
+            The raw photos.
+        """
+        project = self._project
+        photos: list[Photo] = []
+        if project is None:
+            return photos
+        seen: set[str] = set()
+        for photo_id in photo_ids:
+            photo = project.photo(photo_id)
+            if photo is None or not photo.is_raw or photo_id in seen:
+                continue
+            seen.add(photo_id)
+            photos.append(photo)
+        return photos
+
+    def _preview_ids(self, group_ids: Sequence[str]) -> list[str]:
+        """The photos that stand for some groups now.
+
+        Args:
+            group_ids: Ids of the groups.
+
+        Returns:
+            One photo id per group that has a preview, in the order of the groups.
+        """
+        preview_ids: list[str] = []
+        for group_id in group_ids:
+            sample = self.sample_photo(group_id)
+            if sample is not None:
+                preview_ids.append(sample.id)
+        return preview_ids
+
+    def _refresh_job(self, photos: Sequence[Photo], context: TaskContext) -> RefreshResult:
+        """Develop the preview of each photo with its sidecar. Runs on a worker thread.
+
+        Args:
+            photos: The raw photos.
+            context: For progress, the pictures, and stop requests.
+
+        Returns:
+            What the refresh did.
+        """
+        thumbnails = self._services.thumbnails
+        problems: list[str] = []
+        developed = 0
+        total = len(photos)
+        for done, photo in enumerate(photos):
+            if context.stop_requested:
+                break
+            context.report_item(done, total, photo.name)
+            try:
+                pixels = thumbnails.develop(photo)
+            except (DarktableError, OSError) as error:
+                message = str(error)
+                problems.append(message)
+                continue
+            image = self._converter.to_qimage(pixels)
+            picture = DevelopedPicture(photo.id, image)
+            context.send(picture)
+            developed += 1
+        tried = developed + len(problems)
+        stopped = tried < total
+        context.report(tried, total)
+        return RefreshResult(developed, total, problems, stopped)
+
+    def _on_picture_developed(self, picture: DevelopedPicture) -> None:
+        """Show a photo's new preview in the photo grids and the group lists.
+
+        Args:
+            picture: The photo's id and its new thumbnail.
+        """
+        project = self._project
+        if project is None or project.photo(picture.photo_id) is None:
+            return
+        self._thumbnails[picture.photo_id] = picture.thumbnail
+        self.photo_updated.emit(picture.photo_id)
+        self.thumbnail_changed.emit(picture.photo_id)
+
+    def _on_previews_refreshed(self, asked: bool, result: RefreshResult) -> None:
+        """Say how a refresh of previews went.
+
+        Args:
+            asked: True when the user asked for the refresh; otherwise only problems are told, as a notice.
+            result: What the refresh did.
+        """
+        if result.problems:
+            failed = len(result.problems)
+            failed_text = count_text(failed, "preview")
+            first = result.problems[0]
+            message = f"{failed_text} could not be refreshed. {first}"
+            if asked:
+                self.problem.emit(message)
+            else:
+                self.notice.emit(message)
+            return
+        if not asked:
+            return
+        if result.stopped:
+            self.notice.emit(f"Stopped refreshing the previews after {result.developed} of {result.total}.")
+            return
+        developed_text = count_text(result.developed, "preview")
+        self.notice.emit(f"Refreshed {developed_text}.")
 
     # --------------------------------------------------------- private: faces
 
@@ -1246,6 +2209,37 @@ class ProjectController(QObject):
         """
         self.notice.emit("The face models are ready.")
         self.faces_changed.emit()
+
+    def _merged_group(self, groups: Sequence[PhotoGroup]) -> PhotoGroup:
+        """The group made of several groups: the photos and people of all of them, with the first group's id and name.
+
+        Args:
+            groups: The groups, the first one first.
+
+        Returns:
+            The merged group. Its photos are in time order, and its line of
+            details gives the new time range; photos missing from the project
+            go last, so none is lost.
+        """
+        project = self._project
+        first = groups[0]
+        photo_ids: list[str] = []
+        person_ids: list[str] = []
+        for group in groups:
+            for photo_id in group.photo_ids:
+                if photo_id not in photo_ids:
+                    photo_ids.append(photo_id)
+            for person_id in group.person_ids:
+                if person_id not in person_ids:
+                    person_ids.append(person_id)
+        found = [project.photo(photo_id) for photo_id in photo_ids]
+        photos = [photo for photo in found if photo is not None]
+        photos.sort(key=Photo.sort_key)
+        ordered_ids = [photo.id for photo in photos]
+        missing = [photo_id for photo_id in photo_ids if photo_id not in ordered_ids]
+        ordered_ids.extend(missing)
+        details = Grouper.time_range(photos)
+        return PhotoGroup(first.id, first.title, ordered_ids, first.sample_id, details, person_ids, first.renamed)
 
     def _retitle_people_groups(self) -> None:
         """Give the groups made by people the current names, keeping the user's picks and own group names."""
@@ -1718,7 +2712,8 @@ class ProjectController(QObject):
         darktable develops at full size and shrinks at the end, as for the
         export; its faster preview mode shrinks first and loses fine detail.
         Options with the same darktable edit (or none) share one development,
-        so the sample is developed once per edit.
+        so the sample is developed once per edit. The sample's own sidecar
+        counts as no edit, since darktable reads it either way.
 
         Args:
             sample: The sample photo.
@@ -1729,7 +2724,9 @@ class ProjectController(QObject):
             RGB values from 0 to 1.
         """
         edit = option.darktable_edit
-        key = "" if edit is None else str(edit)
+        key = ""
+        if edit is not None and not self._services.developer.is_own_sidecar(sample, edit):
+            key = str(edit)
         pixels = developed.get(key)
         if pixels is None:
             pixels = self._services.developer.develop(sample, option, self.VERSION_SIDE, True)
@@ -1813,7 +2810,8 @@ class ProjectController(QObject):
         if sample is None:
             return
         faces = project.faces_of(sample.id)
-        options = [option]
+        photo_option = self._option_for_photo(sample, option)
+        options = [photo_option]
         sharpen = project.export.sharpen
         job = partial(self._versions_job, group_id, sample, options, faces, sharpen)
         self._tasks.start("Making your version", job, self._on_one_version_ready, self._on_task_failed)
@@ -1837,6 +2835,45 @@ class ProjectController(QObject):
         self.versions_changed.emit(group_id)
 
     # -------------------------------------------------------- private: export
+
+    def _start_export(self, items: Sequence[tuple[Photo, RefinementPipeline]]) -> None:
+        """Export photos in the background, with the settings of the Export step.
+
+        Args:
+            items: The photos, each with the option it is refined with.
+        """
+        project = self._project
+        settings = project.export
+        folder = self.export_folder
+        folder_text = str(folder)
+        run_settings = ExportSettings(
+            folder_text,
+            settings.long_side,
+            settings.quality,
+            settings.copy_metadata,
+            settings.sharpen,
+            settings.overwrite,
+        )
+        faces = {photo.id: project.faces_of(photo.id) for photo, _option in items}
+        job = partial(self._export_job, items, faces, run_settings)
+        self._tasks.start("Exporting photos", job, self._on_export_finished, self._on_task_failed)
+
+    def _export_option_of(self, group_id: str) -> RefinementPipeline:
+        """The option a group's photos are exported with: its pick, or the unchanged option.
+
+        Args:
+            group_id: Id of the group.
+
+        Returns:
+            The picked option; the unchanged option when the group has no pick, is skipped, or its pick was removed.
+        """
+        project = self._project
+        choice = project.choice_of(group_id)
+        if choice is not None and choice.pipeline_id is not None:
+            option = project.pipeline(choice.pipeline_id)
+            if option is not None:
+                return option
+        return RefinementPipeline.camera()
 
     def _export_job(
         self,
@@ -1891,7 +2928,10 @@ class ProjectController(QObject):
         details = {"written": written, "replaced": replaced, "skipped": skipped, "failed": failed}
         self._services.history_log.record("export", details)
         written_text = f"{written} written ({replaced} over old files)" if replaced else f"{written} written"
-        self.notice.emit(f"Export done: {written_text}, {skipped} skipped, {failed} failed.")
+        message = f"Export done: {written_text}, {skipped} skipped, {failed} failed."
+        if skipped:
+            message = f"{message} Skipped photos already have a file in the folder; the Export step can overwrite them."
+        self.notice.emit(message)
         self.export_finished.emit(results)
 
     # ------------------------------------------------------- private: preview

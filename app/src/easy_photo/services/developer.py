@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from easy_photo.model.photo import Photo
@@ -21,7 +23,10 @@ class PhotoDeveloper:
     A raw file is developed from its raw data with darktable-cli when it is
     installed. When the option carries a darktable edit, darktable applies
     that edit; otherwise it uses the photo's own darktable sidecar, or its
-    default development when the photo has none.
+    default development when the photo has none. When the option's edit is
+    the photo's own sidecar, the photo keeps all of its edit, its crop too;
+    only the other photos get the edit without the parts that fit this photo
+    alone.
 
     Without darktable-cli, a raw file gives the JPEG preview the camera stores
     inside it, which is small and already compressed. Ordinary image files are
@@ -107,9 +112,10 @@ class PhotoDeveloper:
             DevelopError: When the edit cannot be read or darktable-cli fails.
         """
         edit_text = None
-        if pipeline.darktable_edit is not None:
+        edit_file = pipeline.darktable_edit
+        if edit_file is not None and not self.is_own_sidecar(photo, edit_file):
             try:
-                edit = DarktableEdit.read(pipeline.darktable_edit)
+                edit = DarktableEdit.read(edit_file)
             except DarktableEditError as error:
                 message = str(error)
                 raise DevelopError(message) from error
@@ -119,3 +125,23 @@ class PhotoDeveloper:
         except DarktableError as error:
             message = str(error)
             raise DevelopError(message) from error
+
+    def is_own_sidecar(self, photo: Photo, edit_file: Path) -> bool:
+        """Tell whether a darktable edit file is the photo's own sidecar.
+
+        darktable-cli then reads the sidecar by itself, in full, the way
+        darktable shows the photo.
+
+        Args:
+            photo: The photo.
+            edit_file: The XMP file of an option's darktable edit.
+
+        Returns:
+            True when the file is the sidecar next to the photo.
+        """
+        own = self._darktable.sidecar_for(photo.path)
+        if own is None:
+            return False
+        own_path = own.resolve()
+        edit_path = edit_file.resolve()
+        return own_path == edit_path

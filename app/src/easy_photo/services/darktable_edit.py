@@ -10,13 +10,16 @@ settings that only fit the photo the edit was made for.
 from __future__ import annotations
 
 import base64
+import os
+import shutil
 import struct
+import uuid
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
-from easy_photo.model.photo import FileKind
+from easy_photo.model.photo import FileKind, Photo
 
 
 class DarktableEditError(Exception):
@@ -245,9 +248,7 @@ class DarktableEdit:
         Returns:
             The XMP text.
         """
-        ElementTree.register_namespace("x", self.XMP_META)
-        ElementTree.register_namespace("rdf", self.RDF)
-        ElementTree.register_namespace("darktable", self.DARKTABLE)
+        self.register_prefixes()
         meta_name = "{" + self.XMP_META + "}xmpmeta"
         root = ElementTree.Element(meta_name)
         rdf_name = self._rdf("RDF")
@@ -256,6 +257,36 @@ class DarktableEdit:
         description = ElementTree.SubElement(rdf, description_name)
         about_name = self._rdf("about")
         description.set(about_name, "")
+        self.fill_description(description)
+        return self.xml_text(root)
+
+    @classmethod
+    def register_prefixes(cls) -> None:
+        """Make ElementTree write darktable's usual namespace prefixes (x, rdf, darktable)."""
+        ElementTree.register_namespace("x", cls.XMP_META)
+        ElementTree.register_namespace("rdf", cls.RDF)
+        ElementTree.register_namespace("darktable", cls.DARKTABLE)
+
+    @classmethod
+    def xml_text(cls, root: ElementTree.Element) -> str:
+        """Write a sidecar's XML tree as text, indented, with the XML declaration darktable writes.
+
+        Args:
+            root: The x:xmpmeta element.
+
+        Returns:
+            The XMP text.
+        """
+        ElementTree.indent(root)
+        body = ElementTree.tostring(root, encoding="unicode")
+        return f'<?xml version="1.0" encoding="UTF-8"?>\n{body}\n'
+
+    def fill_description(self, description: ElementTree.Element) -> None:
+        """Put the edit into a sidecar's rdf:Description element, which has no darktable history yet.
+
+        Args:
+            description: The element; the edit's settings, history end, history and an empty mask history are added.
+        """
         for name, value in self._settings.items():
             full_name = self.qualified(name)
             description.set(full_name, value)
@@ -273,9 +304,6 @@ class DarktableEdit:
         history = ElementTree.SubElement(description, history_name)
         sequence = ElementTree.SubElement(history, sequence_name)
         self._write_entries(sequence)
-        ElementTree.indent(root)
-        body = ElementTree.tostring(root, encoding="unicode")
-        return f'<?xml version="1.0" encoding="UTF-8"?>\n{body}\n'
 
     @classmethod
     def _copied_settings(cls, description: ElementTree.Element) -> dict[str, str]:
@@ -434,3 +462,190 @@ class DarktableEdit:
             Text such as "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description".
         """
         return "{" + self.RDF + "}" + name
+
+
+class EditedPhotos:
+    """Tells which raw photos the user edited in darktable, and when, from their sidecar files.
+
+    A photo counts as edited when its sidecar's history holds the user's own
+    changes, not only the modules darktable sets up by itself on import. A
+    sidecar is read once; after that only its file time is checked, and it is
+    read again when that time changed. Checking hundreds of photos again
+    therefore takes milliseconds.
+    """
+
+    def __init__(self) -> None:
+        """Start without any sidecar read."""
+        self._known: dict[Path, tuple[int, bool]] = {}
+        """Sidecar files read so far: their file time in nanoseconds, and whether the user edited the photo."""
+
+    def edited_at(self, photo: Photo) -> float | None:
+        """When the user last changed a photo's darktable edit.
+
+        Args:
+            photo: The photo.
+
+        Returns:
+            The time its sidecar was last written (seconds since 1970) when
+            the sidecar holds the user's own edit; None for other photos.
+        """
+        if not photo.is_raw:
+            return None
+        sidecar_name = f"{photo.path.name}.xmp"
+        sidecar = photo.path.with_name(sidecar_name)
+        try:
+            status = sidecar.stat()
+        except OSError:
+            return None
+        stamp = status.st_mtime_ns
+        known = self._known.get(sidecar)
+        if known is not None and known[0] == stamp:
+            edited = known[1]
+        else:
+            edit_file = DarktableEdit.edit_file_for(photo.path)
+            edited = edit_file is not None
+            self._known[sidecar] = (stamp, edited)
+        if not edited:
+            return None
+        return status.st_mtime
+
+
+class SidecarWriter:
+    """Writes a darktable edit into photos' own sidecar files, as darktable's paste of a history does.
+
+    A photo's old sidecar is copied to a backup folder first. What the old
+    sidecar holds besides the edit, such as the rating, color labels, tags
+    and title, stays; its history is replaced by the edit, which leaves out
+    the parts that only fit the photo it was made for (crop, retouch and the
+    like). The new sidecar has no history hashes: darktable works them out
+    again, and the app counts the photo as edited. darktable reads the new
+    sidecar when it imports the photo, or when the photo is opened again
+    through "Open in darktable".
+    """
+
+    REPLACED_ATTRIBUTES = (
+        "history_end",
+        "iop_order_version",
+        "iop_order_list",
+        "history_basic_hash",
+        "history_auto_hash",
+        "history_current_hash",
+        "auto_presets_applied",
+        "xmp_version",
+        "raw_params",
+    )
+    """The darktable attributes of the old sidecar that belong to its history, and are replaced."""
+
+    REPLACED_ELEMENTS = ("history", "masks_history")
+
+    def sidecar_of(self, photo: Path) -> Path:
+        """The sidecar file of a photo, whether or not it exists.
+
+        Args:
+            photo: The raw file, such as P1199075.RW2.
+
+        Returns:
+            Its sidecar, such as P1199075.RW2.xmp.
+        """
+        sidecar_name = f"{photo.name}.xmp"
+        return photo.with_name(sidecar_name)
+
+    def write(self, edit: DarktableEdit, photo: Path, backup_folder: Path) -> Path | None:
+        """Write an edit into a photo's sidecar, after copying the old sidecar to a backup folder.
+
+        Args:
+            edit: The edit.
+            photo: The raw file.
+            backup_folder: Where the old sidecar is copied to; it is made when needed.
+
+        Returns:
+            The backup copy of the old sidecar, or None when the photo had no sidecar.
+
+        Raises:
+            OSError: When the sidecar or its backup cannot be written.
+        """
+        sidecar = self.sidecar_of(photo)
+        backup = None
+        text = None
+        if sidecar.exists():
+            backup = self._back_up(sidecar, backup_folder)
+            text = self._merged_text(edit, sidecar)
+        if text is None:
+            text = edit.sidecar_text()
+        self._replace(sidecar, text)
+        return backup
+
+    def _back_up(self, sidecar: Path, backup_folder: Path) -> Path:
+        """Copy a sidecar to the backup folder, with its file times.
+
+        Args:
+            sidecar: The sidecar.
+            backup_folder: Where the copy goes.
+
+        Returns:
+            The copy.
+        """
+        backup_folder.mkdir(parents=True, exist_ok=True)
+        backup = backup_folder / sidecar.name
+        shutil.copy2(sidecar, backup)
+        return backup
+
+    def _merged_text(self, edit: DarktableEdit, sidecar: Path) -> str | None:
+        """The old sidecar with its history replaced by the edit.
+
+        Args:
+            edit: The edit.
+            sidecar: The old sidecar.
+
+        Returns:
+            The new XMP text, or None when the old file is not a sidecar that can be read.
+        """
+        try:
+            self._register_prefixes_of(sidecar)
+            tree = ElementTree.parse(sidecar)
+        except (OSError, ElementTree.ParseError):
+            return None
+        root = tree.getroot()
+        description = root.find(".//rdf:Description", DarktableEdit.NAMESPACES)
+        if description is None:
+            return None
+        for name in self.REPLACED_ATTRIBUTES:
+            full_name = DarktableEdit.qualified(name)
+            description.attrib.pop(full_name, None)
+        for name in self.REPLACED_ELEMENTS:
+            full_name = DarktableEdit.qualified(name)
+            old_elements = description.findall(full_name)
+            for element in old_elements:
+                description.remove(element)
+        edit.fill_description(description)
+        return DarktableEdit.xml_text(root)
+
+    def _register_prefixes_of(self, sidecar: Path) -> None:
+        """Keep the namespace prefixes of an old sidecar (dc, xmp, xmpMM and others) when it is written again.
+
+        Args:
+            sidecar: The old sidecar.
+        """
+        DarktableEdit.register_prefixes()
+        events = ElementTree.iterparse(sidecar, events=["start-ns"])
+        for _event, namespace in events:
+            prefix, uri = namespace
+            if not prefix:
+                continue
+            try:
+                ElementTree.register_namespace(prefix, uri)
+            except ValueError:
+                # Prefixes such as "ns0" are kept for ElementTree's own use; it names those itself.
+                continue
+
+    def _replace(self, sidecar: Path, text: str) -> None:
+        """Write a sidecar under a temporary name, then give it its real name, so no half-written file is left.
+
+        Args:
+            sidecar: The sidecar file.
+            text: Its new text.
+        """
+        unique = uuid.uuid4().hex
+        temporary = sidecar.with_name(f".{sidecar.name}.{unique}.part")
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, sidecar)

@@ -8,7 +8,8 @@ from pathlib import Path
 from easy_photo.refinement.commands import CommandParser
 from easy_photo.refinement.steps import StepCatalog
 from easy_photo.services.ai_words import AiWordsReader
-from easy_photo.services.darktable import DarktableRenderer
+from easy_photo.services.darktable import DarktableLauncher, DarktableRenderer
+from easy_photo.services.darktable_edit import EditedPhotos, SidecarWriter
 from easy_photo.services.developer import PhotoDeveloper
 from easy_photo.services.exporter import Exporter
 from easy_photo.services.faces import FaceFinder, FaceModels, PeopleSorter
@@ -20,6 +21,7 @@ from easy_photo.services.photo_reader import PhotoReader
 from easy_photo.services.preview_cache import PreviewCache
 from easy_photo.services.references import ReferenceMeasurer
 from easy_photo.services.refiner import Refiner
+from easy_photo.services.thumbnails import DevelopedThumbnails
 from easy_photo.services.web_search import WebSearch, WikimediaSearch
 from easy_photo.settings import AppFolders, AppSettings
 
@@ -48,6 +50,10 @@ class AppServices:
     manifest: ProjectManifest
     history_log: HistoryLog
     ai_reader: AiWordsReader
+    darktable_launcher: DarktableLauncher
+    edits: EditedPhotos
+    sidecars: SidecarWriter
+    thumbnails: DevelopedThumbnails
 
     @classmethod
     def create(cls, settings: AppSettings, folders: AppFolders) -> AppServices:
@@ -71,6 +77,11 @@ class AppServices:
         people_sorter = PeopleSorter()
         measurer = ReferenceMeasurer(reader, face_finder)
         darktable = DarktableRenderer.locate(settings.darktable_cli)
+        darktable_launcher = DarktableLauncher.locate(darktable.executable)
+        edits = EditedPhotos()
+        sidecars = SidecarWriter()
+        developed_folder = folders.cache / "developed"
+        thumbnails = DevelopedThumbnails(darktable, developed_folder)
         developer = PhotoDeveloper(reader, darktable)
         web_search = WikimediaSearch()
         parser = CommandParser()
@@ -98,4 +109,8 @@ class AppServices:
             manifest,
             history_log,
             ai_reader,
+            darktable_launcher,
+            edits,
+            sidecars,
+            thumbnails,
         )
